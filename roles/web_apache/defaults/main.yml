@@ -1,0 +1,7 @@
+---
+apache_server_name: "{{ inventory_hostname }}"
+apache_http_port: 80
+# Reverse proxy rules: path on Apache -> backend URL
+apache_proxy_rules:
+  - path: /
+    target: "http://127.0.0.1:{{ tomcat_http_port | default(8080) }}/"

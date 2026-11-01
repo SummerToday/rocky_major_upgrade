@@ -1,0 +1,14 @@
+---
+tomcat_user: tomcat
+tomcat_group: tomcat
+tomcat_install_root: /opt
+tomcat_home: /opt/tomcat
+tomcat_version: ""
+tomcat_tarball_url: ""
+tomcat_tarball_checksum: ""
+jdk_package: java-17-openjdk-headless
+java_home: /usr/lib/jvm/jre
+tomcat_java_opts: "-Xms512m -Xmx1024m"
+tomcat_http_port: 8080
+tomcat_open_firewall: false
+tomcat_webapps: []

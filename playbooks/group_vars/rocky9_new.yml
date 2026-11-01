@@ -1,0 +1,31 @@
+---
+# Variables for the new Rocky 9 VM. Fill in the empty values for your environment.
+
+apache_enabled: true
+tomcat_enabled: true
+
+# --- Tomcat / JDK (installed fresh on Rocky 9; never copy binaries from the old VM) ---
+jdk_package: java-17-openjdk-headless
+tomcat_version: ""            # for example the exact version you validated on the old VM
+tomcat_tarball_url: ""        # internal mirror URL of apache-tomcat-<version>.tar.gz
+tomcat_tarball_checksum: ""   # optional, for example sha512:<hash>
+tomcat_http_port: 8080
+tomcat_java_opts: "-Xms512m -Xmx1024m"
+tomcat_open_firewall: false   # true only when clients reach Tomcat directly (no Apache in front)
+# Web applications to deploy, for example:
+#   - name: ROOT
+#     url: https://<internal artifact server>/app.war
+#     checksum: sha256:<hash>
+tomcat_webapps: []
+
+# --- Apache ---
+apache_server_name: "{{ inventory_hostname }}"
+apache_http_port: 80
+# Reverse proxy rules; the default forwards everything to the local Tomcat.
+apache_proxy_rules:
+  - path: /
+    target: "http://127.0.0.1:{{ tomcat_http_port }}/"
+
+# --- Batch / cron jobs stay disabled on the new VM until cutover ---
+batch_units: []
+batch_manage_crond: false

@@ -1,0 +1,19 @@
+---
+# Job templates: r8to9-02-deploy-check (Job Type: Check, Show Changes on)
+#                r8to9-03-deploy-apply (Job Type: Run, after approval)
+# Limit: rocky9_new
+# Everything is installed fresh for Rocky 9; nothing is copied from the old VM.
+- name: Deploy WEB/WAS to the new Rocky 9 VM
+  hosts: rocky9_new
+  become: true
+  gather_facts: true
+  roles:
+    - role: common_rocky9
+    - role: was_tomcat
+      when: tomcat_enabled | default(true) | bool
+    - role: web_apache
+      when: apache_enabled | default(true) | bool
+    # Batch and cron stay disabled until cutover
+    - role: batch_control
+      vars:
+        batch_state: disabled

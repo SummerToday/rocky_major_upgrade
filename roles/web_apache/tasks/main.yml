@@ -1,0 +1,45 @@
+---
+- name: Install Apache httpd and mod_ssl
+  ansible.builtin.dnf:
+    name:
+      - httpd
+      - mod_ssl
+    state: present
+
+- name: Allow httpd to connect to the backend (SELinux)
+  ansible.posix.seboolean:
+    name: httpd_can_network_connect
+    state: true
+    persistent: true
+  when: apache_proxy_rules | length > 0
+
+- name: Deploy the site configuration
+  ansible.builtin.template:
+    src: site.conf.j2
+    dest: /etc/httpd/conf.d/00-site.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart httpd
+
+- name: Open the HTTP and HTTPS services in firewalld
+  ansible.posix.firewalld:
+    service: "{{ item }}"
+    permanent: true
+    immediate: true
+    state: enabled
+  loop:
+    - http
+    - https
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Validate the Apache configuration
+  ansible.builtin.command: httpd -t
+  changed_when: false
+
+- name: Enable and start httpd
+  ansible.builtin.systemd:
+    name: httpd
+    enabled: true
+    state: started
+  ignore_errors: "{{ ansible_check_mode }}"

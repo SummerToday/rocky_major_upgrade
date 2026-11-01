@@ -1,0 +1,19 @@
+---
+# Job template: r8to9-00-bootstrap (Limit: rocky8_old)
+# Makes sure a usable Python exists before any module-based play runs.
+# Does nothing when Python is already present.
+- name: Ensure Python on target hosts
+  hosts: all
+  gather_facts: false        # fact gathering itself needs Python
+  become: true
+  tasks:
+    - name: Look for a usable Python (raw works without Python)
+      ansible.builtin.raw: command -v python3.9 || command -v python3
+      register: py_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install Python when it is missing
+      ansible.builtin.raw: "dnf install -y {{ bootstrap_python_pkg | default('python3') }}"
+      when: py_check.rc != 0
+      changed_when: true

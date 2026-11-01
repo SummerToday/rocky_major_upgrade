@@ -1,0 +1,147 @@
+---
+# Job template: r8to9-01-collect (read-only, Limit: rocky8_old)
+# Collects the Rocky 8 -> 9 compatibility data (8 items) plus listening ports from the old VM.
+# Path lists come from Extra Variables, see examples/collect_extra_vars.yml.
+# Results stay in the job output: the EE container is removed after the job,
+# so fetched files would be lost. Download the output via the API if needed:
+#   /api/v2/jobs/<id>/stdout/?format=txt
+- name: Collect compatibility data from the old VM
+  hosts: rocky8_old
+  gather_facts: true
+  become: true
+  vars:
+    cert_paths: []
+    binary_paths: []
+    script_dirs: []
+    xfs_mount_points: []
+    collect_rpm_va: false     # rpm -Va output is long; enable only when needed
+  tasks:
+    - name: OS release
+      ansible.builtin.command: cat /etc/rocky-release
+      register: os_release
+      changed_when: false
+
+    - name: Loaded kernel modules located outside /kernel/ (external candidates)
+      ansible.builtin.shell: |
+        set -o pipefail
+        lsmod | awk 'NR>1{print $1}' | xargs -I{} modinfo -F filename {} 2>/dev/null | grep -v '/kernel/' || true
+      args:
+        executable: /bin/bash
+      register: ext_modules
+      changed_when: false
+
+    - name: DKMS status
+      ansible.builtin.shell: dkms status 2>/dev/null || true
+      register: dkms_status
+      changed_when: false
+
+    - name: Runtime versions
+      ansible.builtin.shell: |
+        python3 -V 2>&1
+        php -v 2>&1 | head -1
+        java -version 2>&1 | head -1
+        exit 0
+      register: runtimes
+      changed_when: false
+
+    - name: Required CPU flags for x86-64-v2
+      ansible.builtin.shell: |
+        for f in cx16 lahf_lm popcnt pni ssse3 sse4_1 sse4_2; do
+          grep -qw "$f" /proc/cpuinfo && echo "OK       $f" || echo "MISSING  $f"
+        done
+      register: cpu_flags
+      changed_when: false
+
+    - name: Binaries behind listening ports and their RPM owner (finds manually installed binaries)
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -lntpH | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -u | while read -r pid; do
+          exe=$(readlink -f "/proc/${pid}/exe")
+          owner=$(rpm -qf "${exe}" 2>&1 | head -n 1)
+          echo "${pid} ${exe} -> ${owner}"
+        done || true
+      args:
+        executable: /bin/bash
+      register: listen_bins
+      changed_when: false
+
+    - name: OpenSSL 1.1 dependency of listed binaries
+      ansible.builtin.shell: "ldd {{ item | quote }} 2>&1 | grep -E 'libssl|libcrypto|not found' || true"
+      loop: "{{ binary_paths }}"
+      register: ldd_result
+      changed_when: false
+
+    - name: Signature algorithm of listed certificates
+      ansible.builtin.shell: "openssl x509 -in {{ item | quote }} -noout -text | grep -i 'Signature Algorithm' | sort -u"
+      args:
+        executable: /bin/bash
+      loop: "{{ cert_paths }}"
+      register: cert_result
+      changed_when: false
+
+    - name: Effective sshd root login setting
+      ansible.builtin.shell: |
+        set -o pipefail
+        sshd -T | grep -i permitrootlogin
+      args:
+        executable: /bin/bash
+      register: sshd_root
+      changed_when: false
+
+    - name: Find cgroup v1 path usage in listed directories
+      ansible.builtin.shell: "grep -rE '/sys/fs/cgroup/(cpu|cpuacct|memory|blkio)' {{ item | quote }} || true"
+      loop: "{{ script_dirs }}"
+      register: cgroup_result
+      changed_when: false
+
+    - name: Legacy network configuration files
+      ansible.builtin.shell: ls /etc/sysconfig/network-scripts/ 2>/dev/null || true
+      register: ifcfg_files
+      changed_when: false
+
+    - name: Hand-written iptables rules
+      ansible.builtin.shell: iptables-save 2>/dev/null || true
+      register: iptables_rules
+      changed_when: false
+
+    - name: Filesystem types
+      ansible.builtin.command: lsblk -f
+      register: lsblk_result
+      changed_when: false
+
+    - name: XFS feature flags of listed mount points
+      ansible.builtin.shell: "xfs_info {{ item | quote }} | grep -E 'bigtime|inobtcount' || true"
+      loop: "{{ xfs_mount_points }}"
+      register: xfs_result
+      changed_when: false
+
+    - name: Listening ports (baseline for validate)
+      ansible.builtin.command: ss -lntp
+      register: listen_ports
+      changed_when: false
+
+    - name: Files changed from the OS packages (rpm -Va)  # noqa: command-instead-of-module
+      ansible.builtin.shell: rpm -Va 2>&1 || true
+      register: rpm_va_result
+      changed_when: false
+      when: collect_rpm_va | bool
+
+    - name: Show collected results
+      ansible.builtin.debug:
+        msg:
+          os_release: "{{ os_release.stdout }}"
+          external_modules: "{{ ext_modules.stdout_lines }}"
+          dkms: "{{ dkms_status.stdout_lines }}"
+          runtimes: "{{ runtimes.stdout_lines }}"
+          cpu_flags: "{{ cpu_flags.stdout_lines }}"
+          listening_binaries: "{{ listen_bins.stdout_lines }}"
+          ldd: "{{ ldd_result.results | map(attribute='stdout_lines') | list }}"
+          cert_signatures: "{{ cert_result.results | map(attribute='stdout_lines') | list }}"
+          sshd_root_login: "{{ sshd_root.stdout }}"
+          cgroup_v1_usage: "{{ cgroup_result.results | map(attribute='stdout_lines') | list }}"
+          network_scripts: "{{ ifcfg_files.stdout_lines }}"
+          iptables: "{{ iptables_rules.stdout_lines }}"
+          filesystems: "{{ lsblk_result.stdout_lines }}"
+          xfs_flags: "{{ xfs_result.results | map(attribute='stdout_lines') | list }}"
+          listen_ports: "{{ listen_ports.stdout_lines }}"
+          rpm_va: "{{ rpm_va_result.stdout_lines | default([]) }}"

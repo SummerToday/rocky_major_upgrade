@@ -1,0 +1,12 @@
+---
+# Variables for the old Rocky 8 VM.
+
+# Systemd timer units that run batch jobs; they are stopped before cutover and restored on rollback.
+# List timer units only: starting a oneshot service unit would run the batch immediately.
+batch_units: []
+batch_manage_crond: false
+
+# Rocky 8 ships Python 3.6. Enable the two lines below only when the EE's ansible-core
+# does not support Python 3.6 on the target (check the ansible-core version of your EE).
+# bootstrap_python_pkg: python39
+# ansible_python_interpreter: /usr/bin/python3.9

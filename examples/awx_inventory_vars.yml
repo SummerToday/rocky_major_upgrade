@@ -1,0 +1,17 @@
+---
+# Host variables to enter in the AWX inventory (inv-r8to9-test). Replace the placeholders.
+#
+# Host: old Rocky 8 VM, member of the group rocky8_old
+#   ansible_host: <old VM IP>      # connect by IP even if DNS is not ready
+#   server_role: web_was
+#   server_type: single
+#
+# Host: new Rocky 9 VM, member of the group rocky9_new
+#   ansible_host: <new temporary IP>
+#   server_role: web_was
+#   server_type: single
+#
+# Groups: r8to9_test (parent) with the children rocky8_old and rocky9_new
+#
+# Inventory variables (applies to every host)
+ansible_python_interpreter: auto_silent

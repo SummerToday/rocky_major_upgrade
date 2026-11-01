@@ -1,0 +1,6 @@
+---
+# Installed by AWX on project sync (needs access to Galaxy or an internal Automation Hub).
+# In a closed network, bake these into a custom EE with ansible-builder instead.
+collections:
+  - name: ansible.posix
+  - name: community.general

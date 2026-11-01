@@ -1,0 +1,12 @@
+---
+# Extra Variables of the job template r8to9-01-collect (replace the placeholders)
+cert_paths:
+  - /path/to/certificate.crt
+binary_paths:
+  - /usr/sbin/httpd
+  - /path/to/directly/installed/binary
+script_dirs:
+  - /path/to/script/directory
+xfs_mount_points:
+  - /
+# collect_rpm_va: true     # enable only when the rpm -Va output is needed

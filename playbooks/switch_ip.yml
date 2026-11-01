@@ -1,0 +1,146 @@
+---
+# Job template: r8to9-05-switch-ip (approval required, Limit: rocky8_old:rocky9_new)
+# OPTIONAL: during the rehearsal the swap may be done from the console instead,
+# and this job used only for the surrounding checks.
+#
+# Flow:
+#   1. old VM: stop batch, move to the isolated IP (detached task, the SSH session to the old VM drops)
+#   2. new VM: wait until the service IP is free, take it over as the PRIMARY address while the
+#              temporary IP stays as a secondary one (so this job keeps its SSH session),
+#              announce the new IP-MAC mapping with gratuitous ARP
+#   3. new VM: health check from the EE, enable batch, check the old VM at its isolated IP
+#
+# Required extra variables: confirm_switch=true, service_ip, old_isolated_ip (and ip_prefix if not 24).
+# After the job, update ansible_host of the hosts in the AWX inventory (swap the addresses).
+- name: Isolate the old VM
+  hosts: rocky8_old
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - confirm_switch | default(false) | bool
+          - service_ip | length > 0
+          - old_isolated_ip | length > 0
+        fail_msg: "Set confirm_switch=true, service_ip and old_isolated_ip"
+        quiet: true
+
+    - name: Detect the NetworkManager connection of the interface
+      ansible.builtin.command:
+        argv: [nmcli, -g, GENERAL.CONNECTION, device, show, "{{ net_iface }}"]
+      register: nm_conn_detect
+      changed_when: false
+      when: nm_connection | length == 0
+
+    - name: Remember the connection name
+      ansible.builtin.set_fact:
+        nm_conn_name: "{{ nm_connection if nm_connection | length > 0 else nm_conn_detect.stdout | trim }}"
+
+    - name: Stop batch jobs on the old VM
+      ansible.builtin.include_role:
+        name: batch_control
+      vars:
+        batch_state: disabled
+
+    - name: Move the old VM to the isolated IP (detached, the SSH session drops)
+      ansible.builtin.shell:
+        cmd: |
+          sleep 3
+          nmcli connection modify "{{ nm_conn_name }}" ipv4.method manual ipv4.addresses "{{ old_isolated_ip }}/{{ ip_prefix }}"
+          nmcli device reapply {{ net_iface }}
+      async: 120
+      poll: 0
+      changed_when: true
+
+- name: Take over the service IP on the new VM
+  hosts: rocky9_new
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Check the inputs
+      ansible.builtin.assert:
+        that:
+          - confirm_switch | default(false) | bool
+          - service_ip | length > 0
+        fail_msg: "Set confirm_switch=true and service_ip"
+        quiet: true
+
+    - name: Detect the NetworkManager connection of the interface
+      ansible.builtin.command:
+        argv: [nmcli, -g, GENERAL.CONNECTION, device, show, "{{ net_iface }}"]
+      register: nm_conn_detect
+      changed_when: false
+      when: nm_connection | length == 0
+
+    - name: Remember the connection name and the temporary IP
+      ansible.builtin.set_fact:
+        nm_conn_name: "{{ nm_connection if nm_connection | length > 0 else nm_conn_detect.stdout | trim }}"
+        temp_ip: "{{ new_temp_ip | default(ansible_host, true) }}"
+
+    - name: Wait until nobody answers for the service IP (duplicate address detection)
+      ansible.builtin.command:
+        argv: [arping, -D, -I, "{{ net_iface }}", -c, "2", "{{ service_ip }}"]
+      register: dad
+      until: dad.rc == 0
+      retries: 10
+      delay: 3
+      changed_when: false
+      failed_when: false
+
+    - name: The service IP must be free before it is assigned
+      ansible.builtin.assert:
+        that:
+          - dad.rc == 0
+        fail_msg: "Another host still answers for {{ service_ip }}; not assigning it"
+        quiet: true
+
+    - name: Assign the service IP (primary) and keep the temporary IP (secondary)
+      ansible.builtin.shell:
+        cmd: |
+          nmcli connection modify "{{ nm_conn_name }}" ipv4.method manual ipv4.addresses "{{ service_ip }}/{{ ip_prefix }},{{ temp_ip }}/{{ ip_prefix }}"
+          nmcli device reapply {{ net_iface }}
+      changed_when: true
+
+    - name: Announce the IP-MAC mapping (gratuitous ARP, request and reply forms)
+      ansible.builtin.command:
+        argv: [arping, "{{ item }}", -I, "{{ net_iface }}", -c, "3", "{{ service_ip }}"]
+      loop: ["-U", "-A"]
+      changed_when: true
+
+    - name: Clear stale neighbor entries of this server
+      ansible.builtin.command:
+        argv: [ip, neigh, flush, dev, "{{ net_iface }}"]
+      changed_when: true
+
+    - name: Health check of the service address from the EE
+      ansible.builtin.uri:
+        url: "{{ cutover_health_url }}"
+        status_code: 200
+        validate_certs: false
+        timeout: 5
+      delegate_to: localhost
+      become: false
+      run_once: true
+      register: cutover_health
+      retries: 30
+      delay: 2
+      until: cutover_health is succeeded
+      when: cutover_health_url | length > 0
+
+    - name: Enable batch jobs on the new VM
+      ansible.builtin.include_role:
+        name: batch_control
+      vars:
+        batch_state: enabled
+
+    - name: Check that the old VM is reachable at its isolated IP (informational)
+      ansible.builtin.wait_for:
+        host: "{{ old_isolated_ip }}"
+        port: 22
+        timeout: 60
+      delegate_to: localhost
+      become: false
+      run_once: true
+      ignore_errors: true
+      when: old_isolated_ip | length > 0

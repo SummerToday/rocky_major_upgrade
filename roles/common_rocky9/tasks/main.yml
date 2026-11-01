@@ -1,0 +1,47 @@
+---
+- name: Assert the target is Rocky Linux 9
+  ansible.builtin.assert:
+    that:
+      - ansible_facts['distribution'] == 'Rocky'
+      - ansible_facts['distribution_major_version'] == '9'
+    fail_msg: "This role targets Rocky Linux 9 only"
+    quiet: true
+
+- name: Assert SELinux is enforcing
+  ansible.builtin.assert:
+    that:
+      - (ansible_facts['selinux']['mode'] | default('disabled')) == 'enforcing'
+    fail_msg: "SELinux is not enforcing; the golden image should ship it enforcing"
+    quiet: true
+  when: common_require_selinux_enforcing | bool
+
+- name: Install base packages
+  ansible.builtin.dnf:
+    name: "{{ common_base_packages }}"
+    state: present
+
+- name: Enable and start firewalld and chronyd
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: true
+    state: started
+  loop:
+    - firewalld
+    - chronyd
+  # The unit files do not exist yet in check mode on a fresh VM
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Send gratuitous ARP when an interface comes up or its address changes
+  ansible.posix.sysctl:
+    name: "{{ item }}"
+    value: "1"
+    sysctl_file: /etc/sysctl.d/90-arp-notify.conf
+    state: present
+    reload: true
+  loop:
+    - net.ipv4.conf.all.arp_notify
+    - net.ipv4.conf.default.arp_notify
+
+- name: Set the time zone
+  community.general.timezone:
+    name: "{{ common_timezone }}"

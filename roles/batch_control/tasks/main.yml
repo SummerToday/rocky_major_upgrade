@@ -1,0 +1,20 @@
+---
+- name: Validate batch_state
+  ansible.builtin.assert:
+    that:
+      - batch_state in ['enabled', 'disabled']
+    quiet: true
+
+- name: Set the state of the batch timer units
+  ansible.builtin.systemd:
+    name: "{{ item }}"
+    enabled: "{{ batch_state == 'enabled' }}"
+    state: "{{ 'started' if batch_state == 'enabled' else 'stopped' }}"
+  loop: "{{ batch_units }}"
+
+- name: Set the state of crond
+  ansible.builtin.systemd:
+    name: crond
+    enabled: "{{ batch_state == 'enabled' }}"
+    state: "{{ 'started' if batch_state == 'enabled' else 'stopped' }}"
+  when: batch_manage_crond | bool

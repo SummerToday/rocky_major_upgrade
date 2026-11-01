@@ -1,0 +1,8 @@
+---
+# Extra Variables for r8to9-05-switch-ip and r8to9-06-rollback-ip (replace the placeholders)
+confirm_switch: true          # switch_ip.yml only
+# confirm_rollback: true      # rollback_ip.yml only
+service_ip: 192.0.2.10
+old_isolated_ip: 192.0.2.99
+ip_prefix: 24
+cutover_health_url: http://192.0.2.10/health

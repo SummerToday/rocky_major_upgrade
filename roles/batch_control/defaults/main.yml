@@ -1,0 +1,7 @@
+---
+# enabled | disabled
+batch_state: disabled
+# Systemd TIMER units only. Starting a oneshot service unit would run the batch right away.
+batch_units: []
+# Also stop/start the system cron daemon (affects every cron job on the host)
+batch_manage_crond: false

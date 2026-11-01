@@ -1,0 +1,154 @@
+---
+- name: Assert the required variables are set
+  ansible.builtin.assert:
+    that:
+      - tomcat_version | length > 0
+      - tomcat_tarball_url | length > 0
+    fail_msg: "Set tomcat_version and tomcat_tarball_url in group_vars/rocky9_new.yml"
+    quiet: true
+
+- name: Install the JDK from the Rocky 9 repository
+  ansible.builtin.dnf:
+    name: "{{ jdk_package }}"
+    state: present
+
+- name: Create the Tomcat group
+  ansible.builtin.group:
+    name: "{{ tomcat_group }}"
+    system: true
+
+- name: Create the Tomcat user
+  ansible.builtin.user:
+    name: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ tomcat_install_root }}"
+    create_home: false
+
+- name: Download the Tomcat tarball
+  ansible.builtin.get_url:
+    url: "{{ tomcat_tarball_url }}"
+    dest: "/var/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+    checksum: "{{ tomcat_tarball_checksum | default(omit, true) }}"
+    mode: "0644"
+
+- name: Check that the tarball is on disk
+  ansible.builtin.stat:
+    path: "/var/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+  register: tomcat_tarball
+
+- name: Create the versioned install directory
+  ansible.builtin.file:
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack Tomcat
+  ansible.builtin.unarchive:
+    src: "/var/tmp/apache-tomcat-{{ tomcat_version }}.tar.gz"
+    dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
+    remote_src: true
+    extra_opts: ["--strip-components=1"]
+    owner: root
+    group: root
+    creates: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin/catalina.sh"
+  when: tomcat_tarball.stat.exists
+  notify: Restart tomcat
+
+- name: Point the stable symlink to this version
+  ansible.builtin.file:
+    src: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
+    dest: "{{ tomcat_home }}"
+    state: link
+  notify: Restart tomcat
+
+- name: Give the runtime directories to the Tomcat user
+  ansible.builtin.file:
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/{{ item }}"
+    state: directory
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
+    recurse: true
+  loop:
+    - logs
+    - temp
+    - work
+    - webapps
+
+- name: Make the configuration readable by the Tomcat group only
+  ansible.builtin.file:
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/conf"
+    state: directory
+    owner: root
+    group: "{{ tomcat_group }}"
+    mode: "u=rwX,g=rX,o="
+    recurse: true
+
+- name: Label the Tomcat scripts as bin_t so systemd may execute them
+  community.general.sefcontext:
+    target: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin(/.*)?"
+    setype: bin_t
+    state: present
+  register: tomcat_sefcontext
+
+- name: Apply the SELinux labels
+  ansible.builtin.command:
+    argv: [restorecon, -Rv, "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin"]
+  register: tomcat_restorecon
+  changed_when: tomcat_restorecon.stdout | length > 0
+  when: tomcat_sefcontext is changed
+
+- name: Install setenv.sh (JVM options)
+  ansible.builtin.template:
+    src: setenv.sh.j2
+    dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin/setenv.sh"
+    owner: root
+    group: "{{ tomcat_group }}"
+    mode: "0640"
+  notify: Restart tomcat
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: tomcat.service.j2
+    dest: /etc/systemd/system/tomcat.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart tomcat
+
+- name: Deploy the web applications
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/webapps/{{ item.name }}.war"
+    checksum: "{{ item.checksum | default(omit, true) }}"
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
+    mode: "0640"
+  loop: "{{ tomcat_webapps }}"
+  notify: Restart tomcat
+
+- name: Open the Tomcat port in firewalld
+  ansible.posix.firewalld:
+    port: "{{ tomcat_http_port }}/tcp"
+    permanent: true
+    immediate: true
+    state: enabled
+  when: tomcat_open_firewall | bool
+  ignore_errors: "{{ ansible_check_mode }}"
+
+- name: Apply pending handlers before starting the service
+  ansible.builtin.meta: flush_handlers
+
+- name: Enable and start Tomcat
+  ansible.builtin.systemd:
+    name: tomcat
+    enabled: true
+    state: started
+    daemon_reload: true
+  # The unit file does not exist yet in check mode on a fresh VM
+  ignore_errors: "{{ ansible_check_mode }}"

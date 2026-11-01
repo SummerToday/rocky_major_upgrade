@@ -1,0 +1,99 @@
+---
+# Job template: r8to9-04-validate (read-only, Limit: rocky9_new)
+# Pre-cutover validation. Any failed assertion means: stop the cutover.
+- name: Validate the new Rocky 9 VM before cutover
+  hosts: rocky9_new
+  become: true
+  gather_facts: true
+  tasks:
+    - name: Collect failed systemd units  # noqa: command-instead-of-module
+      ansible.builtin.command: systemctl --failed --no-legend --plain
+      register: failed_units
+      changed_when: false
+
+    - name: No systemd unit may be in failed state
+      ansible.builtin.assert:
+        that:
+          - failed_units.stdout | trim | length == 0
+        fail_msg: "Failed units: {{ failed_units.stdout_lines }}"
+        quiet: true
+
+    - name: Collect listening TCP ports
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -lntH | awk '{print $4}' | awk -F: '{print $NF}' | sort -un
+      args:
+        executable: /bin/bash
+      register: listen_now
+      changed_when: false
+
+    - name: Compute baseline ports that are not listening
+      ansible.builtin.set_fact:
+        missing_ports: "{{ baseline_ports | map('string') | list | difference(listen_now.stdout_lines) }}"
+
+    - name: Every baseline port must be listening
+      ansible.builtin.assert:
+        that:
+          - missing_ports | length == 0
+        fail_msg: "Ports missing compared with the old VM: {{ missing_ports }}"
+        quiet: true
+
+    - name: Read the cgroup filesystem type
+      ansible.builtin.command: stat -fc %T /sys/fs/cgroup
+      register: cgroup_fs
+      changed_when: false
+
+    - name: Rocky 9 uses cgroup v2
+      ansible.builtin.assert:
+        that:
+          - cgroup_fs.stdout | trim == 'cgroup2fs'
+        quiet: true
+
+    - name: Gather service facts
+      ansible.builtin.service_facts:
+
+    - name: Tomcat must be running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['tomcat.service'].state == 'running'
+        fail_msg: "tomcat.service is not running"
+        quiet: true
+      when: tomcat_enabled | default(true) | bool
+
+    - name: Apache configuration must be valid
+      ansible.builtin.command: httpd -t
+      register: httpd_test
+      changed_when: false
+      when: apache_enabled | default(true) | bool
+
+    - name: Run HTTP health checks
+      ansible.builtin.uri:
+        url: "{{ item.url }}"
+        status_code: "{{ item.status | default(200) }}"
+        validate_certs: "{{ item.validate_certs | default(false) }}"
+        timeout: 10
+      loop: "{{ health_checks }}"
+      register: health_result
+      retries: 5
+      delay: 5
+      until: health_result is succeeded
+
+    - name: Look for recent SELinux denials
+      ansible.builtin.command: ausearch -m avc -ts recent
+      register: avc_recent
+      changed_when: false
+      failed_when: false
+
+    - name: Report SELinux denials (informational)
+      ansible.builtin.debug:
+        msg: "{{ avc_recent.stdout_lines }}"
+      when: avc_recent.rc == 0
+
+    - name: Validation summary
+      ansible.builtin.debug:
+        msg:
+          failed_units: "{{ failed_units.stdout_lines }}"
+          missing_ports: "{{ missing_ports }}"
+          cgroup_fs: "{{ cgroup_fs.stdout }}"
+          health_checks: "{{ health_checks | map(attribute='url') | list }}"
+          selinux_denials_found: "{{ avc_recent.rc == 0 }}"

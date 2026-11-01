@@ -1,0 +1,10 @@
+---
+common_timezone: Asia/Seoul
+common_require_selinux_enforcing: true
+common_base_packages:
+  - firewalld
+  - chrony
+  - rsync
+  - iputils
+  - policycoreutils-python-utils
+  - audit

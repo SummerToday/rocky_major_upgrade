@@ -1,0 +1,24 @@
+---
+# Variables shared by every host.
+# Non-secret values only: never put passwords, keys or tokens in this repository.
+# Extra variables of a job template override everything in this file.
+
+ansible_python_interpreter: auto_silent
+
+# --- Network (used by switch_ip.yml and rollback_ip.yml) ---
+service_ip: ""            # IP that clients use (currently held by the old VM)
+ip_prefix: 24             # prefix length of the service network
+old_isolated_ip: ""       # IP the old VM moves to during cutover
+new_temp_ip: ""           # temporary IP of the new VM; falls back to ansible_host when empty
+nm_connection: ""         # NetworkManager connection name; auto-detected from net_iface when empty
+net_iface: "{{ ansible_facts['default_ipv4']['interface'] | default('eth0') }}"
+rollback_old_connect_ip: ""   # IP used to reach the old VM during rollback; falls back to old_isolated_ip
+cutover_health_url: ""    # full URL of the service address, checked from the EE after cutover
+
+# --- Validation (used by validate.yml) ---
+# Listening TCP ports recorded on the old VM (baseline), for example [22, 80, 443, 8080]
+baseline_ports: []
+# Health checks executed on the new VM, for example:
+#   - url: http://localhost:8080/health
+#     status: 200
+health_checks: []

@@ -1,12 +1,27 @@
 ---
-# Extra Variables of the job template r8to9-01-collect (replace the placeholders)
-cert_paths:
-  - /path/to/certificate.crt
-binary_paths:
-  - /usr/sbin/httpd
-  - /path/to/directly/installed/binary
-script_dirs:
-  - /path/to/script/directory
-xfs_mount_points:
-  - /
-# collect_rpm_va: true     # enable only when the rpm -Va output is needed
+# Extra Variables of the job template r8to9-01-collect.
+# Nothing is required: binaries, certificates, script directories and XFS mounts are
+# discovered on the server. Use these only to ADD targets that discovery cannot see.
+
+# Extra executables/libraries to check for OpenSSL 1.x linkage
+# binary_paths:
+#   - /path/to/extra/binary
+
+# Extra certificate files
+# cert_paths:
+#   - /path/to/extra/cert.pem
+
+# Extra directories to scan for cgroup v1 paths
+# script_dirs:
+#   - /path/to/extra/scripts
+
+# Extra mount points for xfs_info
+# xfs_mount_points:
+#   - /data
+
+# Set only when the web server / Tomcat is not found behind a listening port
+# apache_bin_override: /path/to/httpd
+# tomcat_home_override: /path/to/tomcat
+
+# Print rpm -Va (long output)
+# collect_rpm_va: true

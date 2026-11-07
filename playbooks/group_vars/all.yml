@@ -22,3 +22,168 @@ baseline_ports: []
 #   - url: http://localhost:8080/health
 #     status: 200
 health_checks: []
+
+# --- Shell helpers (used by collect.yml and collect_services.yml) ---
+# Read-only shell functions inserted into the collection scripts with {{ shell_helpers }}.
+# Discovery starts from what is running (listening ports, processes, mounts), so no path
+# has to be typed in by hand.
+shell_helpers: |
+  # Mask values of password-like keys (XML attributes, key=value and key: value forms)
+  mask() {
+    sed -E \
+      -e 's/(pass(word|wd|phrase)?|pwd|secret|token|credential)([A-Za-z_.-]*)="[^"]*"/\1\3="****"/Ig' \
+      -e "s/((pass(word|wd|phrase)?|pwd|secret|token|credential)[A-Za-z_.-]*[[:space:]]*[=:][[:space:]]*)[^[:space:]&;\"']+/\1****/Ig"
+  }
+
+  # Remove XML comments (perl when available) and blank lines
+  strip_xml() {
+    if command -v perl >/dev/null 2>&1; then perl -0pe 's/<!--.*?-->//gs' "$1"; else cat "$1"; fi \
+      | grep -vE '^[[:space:]]*$'
+  }
+
+  # Remove comment and blank lines of plain config files
+  strip_conf() {
+    grep -vE '^[[:space:]]*(#|$)' "$1"
+  }
+
+  # PIDs of the processes that listen on TCP ports
+  listen_pids() {
+    ss -lntpH 2>/dev/null | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -un
+  }
+
+  # First httpd/apache2/nginx binary behind the listening ports ($1 = optional override)
+  find_web_bin() {
+    local pid exe
+    if [ -n "$1" ]; then echo "$1"; return 0; fi
+    for pid in $(listen_pids); do
+      exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
+      case "$(basename "${exe}")" in
+        httpd|apache2|nginx) echo "${exe}"; return 0 ;;
+      esac
+    done
+    return 0
+  }
+
+  # Apache server root ($1 = binary)
+  apache_root() {
+    "$1" -V 2>/dev/null | sed -n 's/.*-D HTTPD_ROOT="\(.*\)"/\1/p'
+  }
+
+  # Apache main configuration file and every included file ($1 = binary)
+  apache_conf_files() {
+    local bin="$1" root conf files
+    root=$(apache_root "${bin}")
+    conf=$("${bin}" -V 2>/dev/null | sed -n 's/.*-D SERVER_CONFIG_FILE="\(.*\)"/\1/p')
+    case "${conf}" in /*) ;; *) conf="${root}/${conf}" ;; esac
+    files=$("${bin}" -t -D DUMP_INCLUDES 2>&1 | awk '$1 ~ /^\(/ && !seen[$2]++ {print $2}')
+    if [ -n "${files}" ]; then echo "${files}"; else echo "${conf}"; fi
+  }
+
+  # Certificate files configured in Apache ($1 = binary)
+  apache_cert_files() {
+    local bin="$1" root c f
+    root=$(apache_root "${bin}")
+    for f in $(apache_conf_files "${bin}"); do
+      grep -hE '^[[:space:]]*(SSLCertificateFile|SSLCertificateChainFile|SSLCACertificateFile)[[:space:]]' "${f}" 2>/dev/null
+    done | awk '{print $2}' | tr -d '"' | sort -u | while read -r c; do
+      case "${c}" in /*) echo "${c}" ;; *) echo "${root}/${c}" ;; esac
+    done
+  }
+
+  # Certificate files configured in Nginx ($1 = binary)
+  nginx_cert_files() {
+    "$1" -T 2>&1 | grep -E '^[[:space:]]*ssl_certificate[[:space:]]' | awk '{print $2}' | tr -d ';"' | sort -u
+  }
+
+  # Listening Tomcat instances as "pid|catalina.base|catalina.home" ($1 = optional override)
+  tomcat_targets() {
+    local pid exe args base home
+    if [ -n "$1" ]; then echo "0|$1|$1"; return 0; fi
+    for pid in $(listen_pids); do
+      exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
+      [ "$(basename "${exe}")" = "java" ] || continue
+      args=$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null)
+      base=$(echo "${args}" | sed -n 's/^-Dcatalina\.base=//p' | head -n 1)
+      home=$(echo "${args}" | sed -n 's/^-Dcatalina\.home=//p' | head -n 1)
+      if [ -n "${base}${home}" ]; then echo "${pid}|${base:-${home}}|${home:-${base}}"; fi
+    done
+    return 0
+  }
+
+  # Certificate files (PEM) referenced in the server.xml of a Tomcat ($1 = catalina.base)
+  tomcat_cert_files() {
+    local base="$1" c
+    [ -f "${base}/conf/server.xml" ] || return 0
+    strip_xml "${base}/conf/server.xml" \
+      | grep -oE '(certificateFile|certificateChainFile|SSLCertificateFile)="[^"]+"' \
+      | sed -E 's/^[^=]+="//; s/"$//' | sort -u | while read -r c; do
+        c="${c//\$\{catalina.base\}/${base}}"
+        case "${c}" in /*) echo "${c}" ;; *) echo "${base}/${c}" ;; esac
+      done
+  }
+
+  # Executables of running processes that no RPM package owns (manually installed programs)
+  nonrpm_exes() {
+    local p exe
+    for p in /proc/[0-9]*; do
+      exe=$(readlink -f "${p}/exe" 2>/dev/null) || continue
+      [ -f "${exe}" ] && echo "${exe}"
+    done | sort -u | while read -r exe; do
+      rpm -qf "${exe}" >/dev/null 2>&1 || echo "${exe}"
+    done
+  }
+
+  # Shared libraries mapped by running processes that no RPM package owns
+  nonrpm_libs() {
+    local lib
+    cat /proc/[0-9]*/maps 2>/dev/null | awk '$6 ~ /^\/.*\.so/ {print $6}' | sort -u | while read -r lib; do
+      [ -f "${lib}" ] || continue
+      rpm -qf "${lib}" >/dev/null 2>&1 || echo "${lib}"
+    done
+  }
+
+  # Install prefix of a program: the directory above bin/ or sbin/, otherwise its own directory.
+  # Prints nothing for broad directories that must not be scanned recursively.
+  scan_prefix() {
+    local d
+    d=$(dirname "$1")
+    case "$(basename "${d}")" in bin|sbin) d=$(dirname "${d}") ;; esac
+    case "${d}" in
+      /|/usr|/etc|/var|/tmp|/var/tmp|/home|/root|/opt|/data|/srv|/mnt|/media) return 0 ;;
+    esac
+    echo "${d}"
+  }
+
+  # One report line per certificate file: verdict, signature algorithm, key size, expiry, subject
+  cert_report() {
+    local f="$1" out sig bits na subj verdict
+    out=$(openssl crl2pkcs7 -nocrl -certfile "${f}" 2>/dev/null | openssl pkcs7 -print_certs -text -noout 2>/dev/null)
+    [ -n "${out}" ] || return 1
+    sig=$(echo "${out}" | grep -E '^[[:space:]]+Signature Algorithm:' | sed -E 's/^[[:space:]]+Signature Algorithm: //' | sort -u | tr '\n' ',' | sed 's/,$//')
+    bits=$(echo "${out}" | grep -oE 'Public-Key: \([0-9]+ bit\)' | grep -oE '[0-9]+' | sort -un | head -n 1)
+    na=$(echo "${out}" | grep -E 'Not After' | sed -E 's/^[[:space:]]+Not After : //' | tr '\n' ';')
+    subj=$(echo "${out}" | grep -E '^[[:space:]]+Subject:' | sed -E 's/^[[:space:]]+Subject: //' | tr '\n' ';')
+    verdict="ok"
+    if echo "${sig}" | grep -qiE 'sha1|md5'; then verdict="SHA1-OR-MD5"
+    elif [ -n "${bits}" ] && [ "${bits}" -lt 2048 ]; then verdict="WEAK-KEY"; fi
+    echo "[${verdict}] ${f} | sig=${sig} | min_key_bits=${bits} | not_after=${na} | subject=${subj}"
+  }
+
+  # Verdict of a Java runtime for cgroup v2: JDK 8u372+, 11.0.16+ and 15+ understand it ($1 = java binary)
+  java_cgroup_v2_verdict() {
+    local v upd
+    v=$("$1" -version 2>&1 | grep -m 1 ' version ')
+    if [[ "${v}" =~ \"1\.8\.0_([0-9]+) ]]; then
+      upd="${BASH_REMATCH[1]}"
+      if [ "${upd}" -ge 372 ]; then echo "ok (8u${upd})"; else echo "REVIEW: 8u${upd} does not understand cgroup v2 (needs 8u372+)"; fi
+    elif [[ "${v}" =~ \"11\.0\.([0-9]+) ]]; then
+      upd="${BASH_REMATCH[1]}"
+      if [ "${upd}" -ge 16 ]; then echo "ok (11.0.${upd})"; else echo "REVIEW: 11.0.${upd} does not understand cgroup v2 (needs 11.0.16+)"; fi
+    elif [[ "${v}" =~ \"1\.[0-7]\. ]]; then
+      echo "REVIEW: Java 7 or older does not understand cgroup v2"
+    elif [ -n "${v}" ]; then
+      echo "ok (${v})"
+    else
+      echo "unknown"
+    fi
+  }

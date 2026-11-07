@@ -1,0 +1,18 @@
+---
+# Extra Variables of the job template r8to9-01b-collect-services.
+# Nothing is required: listening ports and webapp paths are probed automatically.
+
+# Additional URLs for the response baseline (requested from the server itself, 3 times each)
+# health_urls:
+#   - http://127.0.0.1:8080/app/health
+
+# Additional files to print (comments stripped, password-like values masked)
+# extra_files:
+#   - /path/to/application.properties
+
+# Maximum lines printed per file
+# max_conf_lines: 400
+
+# Set only when auto-discovery from the listening processes fails
+# apache_bin_override: /path/to/httpd
+# tomcat_home_override: /path/to/tomcat

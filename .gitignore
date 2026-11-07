@@ -1,0 +1,9 @@
+*.retry
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.vault_pass*
+.ansible/
+__pycache__/
+*.zip

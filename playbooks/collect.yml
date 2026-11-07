@@ -1,19 +1,22 @@
 ---
 # Job template: r8to9-01-collect (read-only, Limit: rocky8_old)
-# Collects the Rocky 8 -> 9 compatibility data (8 items) plus listening ports from the old VM.
-# Path lists come from Extra Variables, see examples/collect_extra_vars.yml.
-# Results stay in the job output: the EE container is removed after the job,
-# so fetched files would be lost. Download the output via the API if needed:
-#   /api/v2/jobs/<id>/stdout/?format=txt
+# Collects the Rocky 8 -> 9 compatibility data from the old VM.
+# Everything is discovered on the server itself (running processes, listening ports,
+# mounts, server configuration), so no path has to be typed in. The variables
+# binary_paths / cert_paths / script_dirs / xfs_mount_points are optional additions.
+# Results stay in the job output: the EE container is removed after the job.
+# Download the output via the API if needed: /api/v2/jobs/<id>/stdout/?format=txt
 - name: Collect compatibility data from the old VM
   hosts: rocky8_old
   gather_facts: true
   become: true
   vars:
-    cert_paths: []
-    binary_paths: []
-    script_dirs: []
-    xfs_mount_points: []
+    binary_paths: []          # optional: extra executables/libraries to check for OpenSSL linkage
+    cert_paths: []            # optional: extra certificate files to check
+    script_dirs: []           # optional: extra directories to scan for cgroup v1 paths
+    xfs_mount_points: []      # optional: extra mount points for xfs_info
+    apache_bin_override: ""   # set only when the web server is not found behind a listening port
+    tomcat_home_override: ""  # set only when Tomcat is not found behind a listening port
     collect_rpm_va: false     # rpm -Va output is long; enable only when needed
   tasks:
     - name: OS release
@@ -65,19 +68,80 @@
       register: listen_bins
       changed_when: false
 
-    - name: OpenSSL 1.1 dependency of listed binaries
-      ansible.builtin.shell: "ldd {{ item | quote }} 2>&1 | grep -E 'libssl|libcrypto|not found' || true"
-      loop: "{{ binary_paths }}"
-      register: ldd_result
-      changed_when: false
-
-    - name: Signature algorithm of listed certificates
-      ansible.builtin.shell: "openssl x509 -in {{ item | quote }} -noout -text | grep -i 'Signature Algorithm' | sort -u"
+    - name: Discover non-RPM programs and libraries in use and check their OpenSSL linkage
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### non-RPM executables of running processes"
+        exes=$(nonrpm_exes)
+        echo "${exes}"
+        echo "### non-RPM shared libraries mapped by running processes"
+        libs=$(nonrpm_libs)
+        echo "${libs}"
+        echo "### OpenSSL linkage verdicts (REVIEW = links OpenSSL 1.x, MISSING = library not found)"
+        extra="{{ binary_paths | map('quote') | join(' ') }}"
+        ok_count=0
+        for f in ${exes} ${libs} ${extra}; do
+          [ -f "${f}" ] || continue
+          out=$(ldd "${f}" 2>&1)
+          case "${out}" in *"not a dynamic executable"*) continue ;; esac
+          if echo "${out}" | grep -q 'not found'; then
+            echo "[MISSING] ${f}"; echo "${out}" | grep 'not found' | sed -E 's/^[[:space:]]+/    /'
+          fi
+          if echo "${out}" | grep -qE 'lib(ssl|crypto)\.so\.(1\.1|10|1\.0)'; then
+            echo "[REVIEW]  ${f}"; echo "${out}" | grep -E 'lib(ssl|crypto)' | sed -E 's/^[[:space:]]+/    /'
+          elif echo "${out}" | grep -qE 'lib(ssl|crypto)\.so'; then
+            ok_count=$((ok_count + 1))
+          fi
+        done
+        echo "(files linking OpenSSL 3 or another non-1.x version: ${ok_count})"
+        exit 0
       args:
         executable: /bin/bash
-      loop: "{{ cert_paths }}"
-      register: cert_result
+      register: ssl_link
       changed_when: false
+      failed_when: false
+
+    - name: Discover certificates (server configuration plus standard and install directories)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        files=""
+        web=$(find_web_bin "{{ apache_bin_override }}")
+        if [ -n "${web}" ]; then
+          case "$(basename "${web}")" in
+            nginx) files="${files}"$'\n'"$(nginx_cert_files "${web}")" ;;
+            *)     files="${files}"$'\n'"$(apache_cert_files "${web}")" ;;
+          esac
+          echo "web server: ${web}"
+        fi
+        tomcat_targets "{{ tomcat_home_override }}" | while IFS='|' read -r pid base home; do
+          echo "tomcat base: ${base}"
+        done
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          base=$(echo "${t}" | cut -d'|' -f2)
+          files="${files}"$'\n'"$(tomcat_cert_files "${base}")"
+        done
+        dirs="/etc/pki/tls/certs /etc/httpd /etc/nginx /etc/letsencrypt/live"
+        for e in $(nonrpm_exes); do
+          p=$(scan_prefix "${e}"); [ -n "${p}" ] && dirs="${dirs} ${p}"
+        done
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          dirs="${dirs} $(echo "${t}" | cut -d'|' -f2)/conf"
+        done
+        found=$(timeout 120 find ${dirs} -maxdepth 6 -type f -size -64k \
+          \( -name '*.crt' -o -name '*.pem' -o -name '*.cer' -o -name '*.cert' \) \
+          ! -name 'ca-bundle*' ! -path '*/ca-trust/*' ! -path '/etc/pki/java/*' 2>/dev/null)
+        extra="{{ cert_paths | join(' ') }}"
+        echo "### certificate report (configured + discovered; private keys and keystores are not read)"
+        printf '%s\n' ${files} ${found} ${extra} | grep -v '^$' | sort -u | while read -r c; do
+          [ -f "${c}" ] || { echo "[NOT-FOUND] ${c}"; continue; }
+          cert_report "${c}" || true
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: cert_info
+      changed_when: false
+      failed_when: false
 
     - name: Effective sshd root login setting
       ansible.builtin.shell: |
@@ -88,11 +152,56 @@
       register: sshd_root
       changed_when: false
 
-    - name: Find cgroup v1 path usage in listed directories
-      ansible.builtin.shell: "grep -rE '/sys/fs/cgroup/(cpu|cpuacct|memory|blkio)' {{ item | quote }} || true"
-      loop: "{{ script_dirs }}"
-      register: cgroup_result
+    - name: Find cgroup v1 usage in discovered scripts, units and install directories
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        roots="/etc/systemd/system /etc/cron.d /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly"
+        roots="${roots} /var/spool/cron /usr/local/bin /usr/local/sbin /etc/profile.d /etc/init.d"
+        for e in $(nonrpm_exes); do
+          p=$(scan_prefix "${e}"); [ -n "${p}" ] && roots="${roots} ${p}"
+        done
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          base=$(echo "${t}" | cut -d'|' -f2); home=$(echo "${t}" | cut -d'|' -f3)
+          roots="${roots} ${base}/bin ${home}/bin"
+        done
+        roots="${roots} {{ script_dirs | map('quote') | join(' ') }}"
+        roots=$(printf '%s\n' ${roots} | sort -u | while read -r r; do [ -e "${r}" ] && echo "${r}"; done)
+        echo "### scanned roots"; echo "${roots}"
+        echo "### matches (file:line)"
+        controllers='cpu|cpuacct|cpuset|memory|blkio|devices|freezer|pids|net_cls|net_prio|hugetlb|perf_event|systemd'
+        timeout 180 grep -rIsnE \
+          --exclude='*.log' --exclude='*.out' --exclude='*.jar' --exclude='*.war' \
+          --exclude-dir=logs --exclude-dir=webapps --exclude-dir=work --exclude-dir=temp \
+          -e "/sys/fs/cgroup/(${controllers})" -e '^[[:space:]]*(CPUShares|MemoryLimit|BlockIO[A-Za-z]*)=' \
+          ${roots} | head -n 200
+        exit 0
+      args:
+        executable: /bin/bash
+      register: cgroup_info
       changed_when: false
+      failed_when: false
+
+    - name: Java runtimes in use and their cgroup v2 support
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        javas=$(
+          {
+            for pid in $(listen_pids); do
+              exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
+              [ "$(basename "${exe}")" = "java" ] && echo "${exe}"
+            done
+            command -v java 2>/dev/null | xargs -r readlink -f
+            ls /usr/lib/jvm/*/bin/java /usr/lib/jvm/*/jre/bin/java /usr/java/*/bin/java 2>/dev/null | xargs -r -n1 readlink -f
+          } | sort -u
+        )
+        [ -n "${javas}" ] || { echo "(no java runtime found)"; exit 0; }
+        for j in ${javas}; do echo "${j}: $(java_cgroup_v2_verdict "${j}")"; done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: java_info
+      changed_when: false
+      failed_when: false
 
     - name: Legacy network configuration files
       ansible.builtin.shell: ls /etc/sysconfig/network-scripts/ 2>/dev/null || true
@@ -109,11 +218,20 @@
       register: lsblk_result
       changed_when: false
 
-    - name: XFS feature flags of listed mount points
-      ansible.builtin.shell: "xfs_info {{ item | quote }} | grep -E 'bigtime|inobtcount' || true"
-      loop: "{{ xfs_mount_points }}"
-      register: xfs_result
+    - name: XFS mounts and their feature flags (mounts are discovered)
+      ansible.builtin.shell: |
+        mounts=$(findmnt -rn -t xfs -o TARGET 2>/dev/null)
+        [ -n "${mounts}" ] || mounts=$(awk '$3 == "xfs" {print $2}' /proc/mounts)
+        mounts=$(printf '%s\n' ${mounts} {{ xfs_mount_points | map('quote') | join(' ') }} | grep -v '^$' | sort -u)
+        [ -n "${mounts}" ] || { echo "(no XFS mount found)"; exit 0; }
+        for m in ${mounts}; do
+          echo "## ${m}"
+          xfs_info "${m}" 2>&1 | grep -E 'crc=|ftype=|bigtime|inobtcount' | sed -E 's/^[[:space:]]+//'
+        done
+        exit 0
+      register: xfs_info_out
       changed_when: false
+      failed_when: false
 
     - name: Listening ports (baseline for validate)
       ansible.builtin.command: ss -lntp
@@ -135,13 +253,14 @@
           runtimes: "{{ runtimes.stdout_lines }}"
           cpu_flags: "{{ cpu_flags.stdout_lines }}"
           listening_binaries: "{{ listen_bins.stdout_lines }}"
-          ldd: "{{ ldd_result.results | map(attribute='stdout_lines') | list }}"
-          cert_signatures: "{{ cert_result.results | map(attribute='stdout_lines') | list }}"
+          openssl_linkage: "{{ ssl_link.stdout_lines }}"
+          certificates: "{{ cert_info.stdout_lines }}"
           sshd_root_login: "{{ sshd_root.stdout }}"
-          cgroup_v1_usage: "{{ cgroup_result.results | map(attribute='stdout_lines') | list }}"
+          cgroup_v1_usage: "{{ cgroup_info.stdout_lines }}"
+          java_cgroup_v2: "{{ java_info.stdout_lines }}"
           network_scripts: "{{ ifcfg_files.stdout_lines }}"
           iptables: "{{ iptables_rules.stdout_lines }}"
           filesystems: "{{ lsblk_result.stdout_lines }}"
-          xfs_flags: "{{ xfs_result.results | map(attribute='stdout_lines') | list }}"
+          xfs_flags: "{{ xfs_info_out.stdout_lines }}"
           listen_ports: "{{ listen_ports.stdout_lines }}"
           rpm_va: "{{ rpm_va_result.stdout_lines | default([]) }}"

@@ -1,0 +1,315 @@
+---
+# Job template: r8to9-01b-collect-services (read-only, Limit: rocky8_old)
+# Collects WEB/WAS service details from the old VM. Paths are discovered from the
+# processes that listen on TCP ports, so no path variables are required.
+#
+# Collected:
+#   - Apache/Nginx: build options, loaded modules, config files (comments stripped,
+#     secrets masked), OpenSSL linkage of the binary and modules, certificate details
+#   - Tomcat: CATALINA_BASE/HOME, JVM options, systemd unit, version, webapps,
+#     server.xml/context.xml, JDBC/LDAP/Redis/HTTP targets, TLS files, DB driver jars,
+#     native libraries and their OpenSSL linkage
+#   - Batch/cron: crontabs, cron.d, systemd timers, enabled services
+#   - Established connections of the web/WAS processes (integration targets)
+#   - Response baseline: every listening port is probed (http, then https) plus Tomcat webapp paths
+#   - SELinux, firewalld and time zone
+#
+# Nothing is changed on the server. Secrets are masked on a best-effort basis
+# (password, secret, token, credential, passphrase); review the job output before sharing it.
+# Optional extra variables: see examples/collect_services_extra_vars.yml
+- name: Collect WEB/WAS service details from the old VM
+  hosts: rocky8_old
+  gather_facts: false
+  become: true
+  vars:
+    health_urls: []              # optional extra URLs (ports and webapp paths are probed automatically)
+    extra_files: []              # additional files to print (comments stripped, secrets masked)
+    max_conf_lines: 400          # maximum lines printed per file
+    apache_bin_override: ""      # set only when auto-discovery fails (path of httpd or nginx)
+    tomcat_home_override: ""     # set only when auto-discovery fails (used as CATALINA_BASE and HOME)
+  tasks:
+    - name: OS settings that matter for the new VM (SELinux, firewalld, time zone)
+      ansible.builtin.shell: |
+        echo "selinux: $(getenforce 2>&1)"
+        echo "firewalld: $(systemctl is-active firewalld 2>&1)"
+        echo "timezone: $(timedatectl 2>/dev/null | grep -i 'time zone' | sed -E 's/^[[:space:]]+//')"
+        echo "java_home_env: $(grep -rhs '^JAVA_HOME' /etc/profile.d/ /etc/environment 2>/dev/null | head -n 3)"
+      register: os_settings
+      changed_when: false
+      failed_when: false
+
+    - name: Find the web server binary behind the listening ports
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        find_web_bin "{{ apache_bin_override }}"
+        exit 0
+      args:
+        executable: /bin/bash
+      register: web_bin
+      changed_when: false
+
+    - name: Remember the web server binary and its kind
+      ansible.builtin.set_fact:
+        web_bin_path: "{{ web_bin.stdout | trim }}"
+        web_kind: "{{ 'nginx' if (web_bin.stdout | trim).endswith('nginx') else 'apache' }}"
+
+    - name: Collect Apache details (build, modules, config, OpenSSL linkage, certificates)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        bin="{{ web_bin_path }}"
+        echo "### binary: ${bin}"
+        echo "### httpd -V"; "${bin}" -V 2>&1
+        echo "### httpd -M"; "${bin}" -M 2>&1
+        echo "### httpd -S"; "${bin}" -S 2>&1 | head -n 60
+        root=$("${bin}" -V 2>/dev/null | sed -n 's/.*-D HTTPD_ROOT="\(.*\)"/\1/p')
+        conf=$("${bin}" -V 2>/dev/null | sed -n 's/.*-D SERVER_CONFIG_FILE="\(.*\)"/\1/p')
+        case "${conf}" in /*) ;; *) conf="${root}/${conf}" ;; esac
+        echo "### paths: root=${root} conf=${conf}"
+        files=$("${bin}" -t -D DUMP_INCLUDES 2>&1 | awk '$1 ~ /^\(/ && !seen[$2]++ {print $2}')
+        [ -n "${files}" ] || files="${conf}"
+        for f in ${files}; do
+          echo "### conf: ${f}"
+          strip_conf "${f}" | mask | head -n {{ max_conf_lines }}
+        done
+        echo "### OpenSSL/library linkage (binary and modules)"
+        for f in "${bin}" "${root}"/modules/*.so; do
+          [ -e "${f}" ] || continue
+          out=$(ldd "${f}" 2>&1 | grep -E 'libssl|libcrypto|not found' || true)
+          if [ -n "${out}" ]; then echo "${f}"; echo "${out}" | sed -E 's/^[[:space:]]+/    /'; fi
+        done
+        echo "### certificate report (SSLCertificateFile, ChainFile, CACertificateFile)"
+        apache_cert_files "${bin}" | while read -r c; do
+          if [ -f "${c}" ]; then cert_report "${c}" || echo "[NO-CERT-DATA] ${c}"; else echo "[NOT-FOUND] ${c}"; fi
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: apache_info
+      changed_when: false
+      failed_when: false
+      when:
+        - web_bin_path | length > 0
+        - web_kind == 'apache'
+
+    - name: Collect Nginx details (build, config, OpenSSL linkage, certificates)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        bin="{{ web_bin_path }}"
+        echo "### binary: ${bin}"
+        echo "### nginx -V"; "${bin}" -V 2>&1
+        echo "### nginx -T (effective configuration)"
+        "${bin}" -T 2>&1 | grep -vE '^[[:space:]]*(#|$)' | mask | head -n {{ max_conf_lines }}
+        echo "### OpenSSL/library linkage"
+        ldd "${bin}" 2>&1 | grep -E 'libssl|libcrypto|not found' || true
+        echo "### certificate report (ssl_certificate)"
+        nginx_cert_files "${bin}" | while read -r c; do
+          if [ -f "${c}" ]; then cert_report "${c}" || echo "[NO-CERT-DATA] ${c}"; else echo "[NOT-FOUND] ${c}"; fi
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: nginx_info
+      changed_when: false
+      failed_when: false
+      when:
+        - web_bin_path | length > 0
+        - web_kind == 'nginx'
+
+    - name: Collect Tomcat details (paths, JVM, unit, webapps, config, integrations, native libs)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        targets=$(tomcat_targets "{{ tomcat_home_override }}")
+        [ -n "${targets}" ] || { echo "(no Tomcat process found among the listening java processes)"; exit 0; }
+        echo "${targets}" | while IFS='|' read -r pid base home; do
+          echo "################ Tomcat pid=${pid}"
+          echo "CATALINA_BASE=${base}"
+          echo "CATALINA_HOME=${home}"
+          if [ "${pid}" != "0" ]; then
+            jexe=$(readlink -f "/proc/${pid}/exe")
+            echo "java=${jexe}"
+            echo "java_version=$("${jexe}" -version 2>&1 | head -n 1)"
+            echo "run_as=$(ps -o user= -p "${pid}")"
+            unit=$(systemctl status "${pid}" --no-pager 2>/dev/null | head -n 1 | sed -E 's/^[^A-Za-z0-9_@.-]*[[:space:]]*//' | awk '{print $1}')
+            echo "systemd_unit=${unit}"
+            echo "### JVM options"
+            tr '\0' '\n' < "/proc/${pid}/cmdline" | grep -E '^-(X|D|javaagent|agentlib)' | mask
+            if [ -n "${unit}" ]; then
+              echo "### systemctl cat ${unit}"
+              systemctl cat "${unit}" --no-pager 2>&1 | mask
+            fi
+          fi
+          echo "### Tomcat version"
+          {
+            grep -m 1 'Apache Tomcat Version' "${home}/RELEASE-NOTES" \
+              || unzip -p "${home}/lib/catalina.jar" org/apache/catalina/util/ServerInfo.properties | grep '^server.info'
+          } 2>/dev/null
+          echo "### webapps"; ls -l "${base}/webapps" 2>&1
+          echo "### conf directory"; ls -l "${base}/conf" 2>&1
+          confdump=""
+          for f in "${base}/conf/server.xml" "${base}/conf/context.xml" "${base}"/conf/Catalina/*/*.xml; do
+            [ -f "${f}" ] || continue
+            body=$(strip_xml "${f}" | mask | head -n {{ max_conf_lines }})
+            echo "### file: ${f}"
+            echo "${body}"
+            confdump="${confdump}"$'\n'"${body}"
+          done
+          for f in $(printf '%s\n' "${base}/bin/setenv.sh" "${home}/bin/setenv.sh" | sort -u); do
+            [ -f "${f}" ] || continue
+            echo "### file: ${f}"
+            strip_conf "${f}" | mask | head -n {{ max_conf_lines }}
+          done
+          echo "### integration targets (URLs found in the files above)"
+          echo "${confdump}" | grep -oE '(jdbc:[^" <]+|(ldaps?|rediss?|https?)://[^" <]+)' | sort -u
+          echo "### TLS certificate report (PEM files referenced by Tomcat)"
+          tomcat_cert_files "${base}" | while read -r c; do
+            if [ -f "${c}" ]; then cert_report "${c}" || echo "[NO-CERT-DATA] ${c}"; else echo "[NOT-FOUND] ${c}"; fi
+          done
+          echo "### keystore files referenced by Tomcat (contents are not read)"
+          echo "${confdump}" | grep -oE '(keystoreFile|certificateKeystoreFile|truststoreFile)="[^"]+"' | sort -u
+          echo "### DB/cache driver jars in lib"
+          ls "${home}/lib" "${base}/lib" 2>/dev/null | grep -iE 'jdbc|ojdbc|tibero|mysql|mariadb|postgres|mssql|jtds|cubrid|redis|lettuce|jedis' | sort -u
+          echo "### native libraries and their OpenSSL linkage"
+          find "${home}" "${base}" -type f \( -name 'libtcnative*' -o -name 'libapr*' -o -name '*.so' \) 2>/dev/null | sort -u | while read -r so; do
+            echo "${so}"
+            ldd "${so}" 2>&1 | grep -E 'libssl|libcrypto|not found' | sed -E 's/^[[:space:]]+/    /' || true
+          done
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: tomcat_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect batch and cron settings
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### /etc/crontab"; strip_conf /etc/crontab 2>/dev/null | mask
+        echo "### /etc/cron.d"
+        for f in /etc/cron.d/*; do
+          [ -f "${f}" ] || continue
+          echo "-- ${f}"; strip_conf "${f}" | mask
+        done
+        echo "### user crontabs (/var/spool/cron)"
+        for f in /var/spool/cron/*; do
+          [ -f "${f}" ] || continue
+          echo "-- ${f}"; strip_conf "${f}" | mask
+        done
+        echo "### periodic cron scripts"
+        ls /etc/cron.hourly /etc/cron.daily /etc/cron.weekly /etc/cron.monthly 2>/dev/null
+        echo "### systemd timers"
+        systemctl list-timers --all --no-pager 2>&1
+        echo "### enabled unit files"
+        systemctl list-unit-files --state=enabled --no-pager 2>&1
+        exit 0
+      args:
+        executable: /bin/bash
+      register: batch_info
+      changed_when: false
+      failed_when: false
+
+    - name: Collect established connections of the web/WAS processes (integration targets)
+      ansible.builtin.shell: |
+        echo "### established connections (local -> peer, process)"
+        ss -tnpH state established 2>/dev/null | grep -E '"(java|httpd|apache2|nginx)"' | sed -E 's/[[:space:]]+/ /g'
+        echo "### peers by number of connections"
+        ss -tnpH state established 2>/dev/null | grep -E '"(java|httpd|apache2|nginx)"' | awk '{print $4}' | sort | uniq -c | sort -rn
+        exit 0
+      register: conn_info
+      changed_when: false
+      failed_when: false
+
+    - name: Measure the response baseline (listening ports and webapp paths are probed automatically)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        urls=""
+        ports=$(ss -lntH 2>/dev/null | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un)
+        for port in ${ports}; do
+          [ "${port}" = "22" ] && continue
+          for scheme in http https; do
+            code=$(curl -ks -o /dev/null -m 3 -w '%{http_code}' "${scheme}://127.0.0.1:${port}/" 2>/dev/null)
+            if [ -n "${code}" ] && [ "${code}" != "000" ]; then
+              urls="${urls} ${scheme}://127.0.0.1:${port}/"
+              # webapp context paths of the Tomcat that listens on this port
+              pid=$(ss -lntpH "sport = :${port}" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n 1 | cut -d= -f2)
+              if [ -n "${pid}" ]; then
+                base=$(tr '\0' '\n' < "/proc/${pid}/cmdline" 2>/dev/null | sed -n 's/^-Dcatalina\.base=//p' | head -n 1)
+                if [ -n "${base}" ] && [ -d "${base}/webapps" ]; then
+                  for w in "${base}"/webapps/*; do
+                    n=$(basename "${w%.war}")
+                    case "${n}" in ROOT|manager|host-manager|docs|examples|'*') continue ;; esac
+                    urls="${urls} ${scheme}://127.0.0.1:${port}/${n}/"
+                  done
+                fi
+              fi
+              break
+            fi
+          done
+        done
+        urls=$(printf '%s\n' ${urls} {{ health_urls | map('quote') | join(' ') }} | grep -v '^$' | sort -u)
+        [ -n "${urls}" ] || { echo "(no HTTP(S) responder found on the listening ports)"; exit 0; }
+        for u in ${urls}; do
+          for i in 1 2 3; do
+            printf '%s ' "${u}"
+            curl -ks -o /dev/null -m 10 -w '%{http_code} %{time_total}s\n' "${u}"
+          done
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: health_info
+      changed_when: false
+      failed_when: false
+
+    - name: Print additional files (comments stripped, secrets masked)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### file: {{ item }}"
+        if [ -f {{ item | quote }} ]; then strip_conf {{ item | quote }} | mask | head -n {{ max_conf_lines }}; else echo "(file not found)"; fi
+        exit 0
+      args:
+        executable: /bin/bash
+      loop: "{{ extra_files }}"
+      register: extra_info
+      changed_when: false
+      failed_when: false
+
+    - name: Show OS settings
+      ansible.builtin.debug:
+        msg: "{{ os_settings.stdout_lines }}"
+
+    - name: Show web server details (Apache)
+      ansible.builtin.debug:
+        msg: "{{ apache_info.stdout_lines }}"
+      when: apache_info is not skipped
+
+    - name: Show web server details (Nginx)
+      ansible.builtin.debug:
+        msg: "{{ nginx_info.stdout_lines }}"
+      when: nginx_info is not skipped
+
+    - name: Warn when no web server process was found
+      ansible.builtin.debug:
+        msg: "No httpd/nginx process found behind the listening ports. Set apache_bin_override if it runs differently."
+      when: web_bin_path | length == 0
+
+    - name: Show Tomcat details
+      ansible.builtin.debug:
+        msg: "{{ tomcat_info.stdout_lines }}"
+
+    - name: Show batch and cron settings
+      ansible.builtin.debug:
+        msg: "{{ batch_info.stdout_lines }}"
+
+    - name: Show established connections
+      ansible.builtin.debug:
+        msg: "{{ conn_info.stdout_lines }}"
+
+    - name: Show response baseline
+      ansible.builtin.debug:
+        msg: "{{ health_info.stdout_lines }}"
+
+    - name: Show additional files
+      ansible.builtin.debug:
+        msg: "{{ extra_info.results | map(attribute='stdout_lines') | list }}"
+      when: extra_files | length > 0

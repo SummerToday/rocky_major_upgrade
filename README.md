@@ -11,12 +11,13 @@ ansible.cfg
 collections/requirements.yml      # ansible.posix, community.general
 playbooks/
   bootstrap.yml                   # Python 검사/설치 (없을 때만 변경)
-  collect.yml                     # 구 VM 읽기 전용 수집 (변경점 8개 항목)
+  collect.yml                     # 구 VM 읽기 전용 수집 (변경점 8개 항목, 대상 자동 탐색)
+  collect_services.yml            # 구 VM WEB/WAS 상세 수집 (경로 자동 탐색, 읽기 전용)
   deploy.yml                      # 신규 VM 배포 (check / apply 공용)
   validate.yml                    # 전환 전 검증 (읽기 전용)
   switch_ip.yml                   # IP 교체 전환 (선택)
   rollback_ip.yml                 # IP 원복 롤백 (선택)
-  group_vars/                     # 비밀값 없는 변수만
+  group_vars/                     # 비밀값 없는 변수만 (all.yml에 수집용 셸 함수 shell_helpers 포함)
 roles/
   common_rocky9/                  # Rocky 9 기본 설정, gratuitous ARP sysctl
   was_tomcat/                     # JDK + Tomcat 신규 설치, systemd, webapps
@@ -34,7 +35,8 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 | 템플릿 | Job Type | Playbook | Limit | 비고 |
 |---|---|---|---|---|
 | r8to9-00-bootstrap | Run | playbooks/bootstrap.yml | rocky8_old | Python이 있으면 변경 없음 |
-| r8to9-01-collect | Run | playbooks/collect.yml | rocky8_old | Extra Vars: `examples/collect_extra_vars.yml` |
+| r8to9-01-collect | Run | playbooks/collect.yml | rocky8_old | Extra Vars 불필요 (선택: `examples/collect_extra_vars.yml`) |
+| r8to9-01b-collect-services | Run | playbooks/collect_services.yml | rocky8_old | 변수는 모두 선택, `examples/collect_services_extra_vars.yml` |
 | r8to9-02-deploy-check | **Check** | playbooks/deploy.yml | rocky9_new | Show Changes 켬 |
 | r8to9-03-deploy-apply | Run | playbooks/deploy.yml | rocky9_new | check 결과 승인 후 |
 | r8to9-04-validate | Run | playbooks/validate.yml | rocky9_new | 읽기 전용 |
@@ -46,12 +48,44 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 ## 사용 순서
 
 1. 구 VM과 신규 VM에 자동화 계정, 공개키, sudoers를 준비하고 인벤토리에 등록합니다 (`examples/awx_inventory_vars.yml`).
-2. `bootstrap` → `collect` 실행 후 결과를 사람이 판정합니다.
+2. `bootstrap` → `collect` → `collect_services` 실행 후 결과를 사람이 판정합니다.
 3. `playbooks/group_vars/rocky9_new.yml`의 빈 값을 채웁니다 (`tomcat_version`, `tomcat_tarball_url`, `tomcat_webapps` 등).
 4. `deploy-check` 결과를 확인·승인한 뒤 `deploy-apply`, `validate`를 실행합니다.
 5. 전환과 롤백은 `switch_ip` / `rollback_ip` 또는 콘솔로 수행합니다. 롤백은 성공해도 1회 의도적으로 수행해 시간을 실측하세요.
 
 다운타임 실측은 작업 PC에서 1초 간격 curl 루프가 가장 정확합니다 (계획서 Q4 참고).
+
+## collect_services 수집 범위
+
+실행 중인 프로세스(`ss -lntp`)에서 Apache/Nginx와 Tomcat 경로를 **자동으로 찾아** 수집합니다. 서버는 변경하지 않습니다.
+
+| 구분 | 수집 내용 |
+|---|---|
+| Apache / Nginx | 빌드 옵션(`-V`), 로드 모듈(`-M`), 설정 파일(주석 제거), 바이너리·모듈의 OpenSSL 링크, 인증서 서명 알고리즘과 만료일 |
+| Tomcat | CATALINA_BASE/HOME, JVM 옵션, systemd unit, 버전, webapps, server.xml/context.xml, JDBC·LDAP·Redis·HTTP 연동 대상, TLS 파일, DB 드라이버 jar, 네이티브 라이브러리의 OpenSSL 링크 |
+| 배치 | crontab, cron.d, systemd timer, enabled 서비스 |
+| 연동 | web/WAS 프로세스의 established 연결(연동 대상 IP:포트) |
+| 기준값 | 리슨 중인 모든 포트(22 제외)를 http→https로 찔러 응답하는 URL과 Tomcat webapp 경로를 자동 측정 (3회, 응답 코드·시간). `health_urls`는 추가용 |
+| OS | SELinux, firewalld, 타임존 |
+
+- 비밀번호·secret·token·credential·passphrase 값은 `****`로 가립니다. 최선의 처리이므로 **출력을 공유하기 전에 직접 확인**하세요.
+- 개인키 파일과 키스토어(jks, p12) 내용은 읽지 않습니다. 경로만 표시합니다.
+- 자동 탐색에 실패하면 `apache_bin_override`, `tomcat_home_override`로 직접 지정하세요.
+- systemd unit 탐색(`systemctl status <pid>`)은 실제 Rocky 8 서버에서 첫 실행 때 확인이 필요합니다.
+
+## collect 자동 탐색 방식
+
+사용자가 경로를 입력하지 않아도 서버에서 직접 알아냅니다. 입력 변수(`binary_paths`, `cert_paths`, `script_dirs`, `xfs_mount_points`)는 **추가용 선택값**입니다.
+
+| 대상 | 탐색 방법 |
+|---|---|
+| 직접 설치한 바이너리·라이브러리 | 실행 중인 모든 프로세스의 실행 파일과 매핑된 `.so` 중 `rpm -qf`가 실패하는 것 → `ldd`로 OpenSSL 1.x 의존(`REVIEW`), 누락(`MISSING`) 판정 |
+| 인증서 | Apache/Nginx/Tomcat 설정에서 추출 + `/etc/pki/tls/certs`, `/etc/httpd`, `/etc/nginx`, 설치 디렉터리 스캔 → SHA-1/MD5, 2048bit 미만 판정과 만료일 |
+| cgroup v1 경로 | systemd unit, cron, `/usr/local/bin`, 직접 설치 프로그램과 Tomcat bin 디렉터리 스캔 (CPUShares, MemoryLimit 포함) |
+| Java cgroup v2 | 리슨 중인 java와 설치된 JDK 버전 판정 (8u372+, 11.0.16+, 15+) |
+| XFS | `findmnt -t xfs`로 마운트 탐색 후 `xfs_info` |
+
+탐색 결과의 한계: 실행 중이 아닌 프로그램, 64KB 초과 인증서 파일, 깊이 6 초과 경로는 놓칩니다. 이때만 추가 변수를 사용하세요.
 
 ## 주의 사항
 

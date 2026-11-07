@@ -1,0 +1,9 @@
+---
+profile: moderate
+exclude_paths:
+  - .git/
+  - examples/
+  - collections/
+skip_list:
+  # tomcat_* and apache_* variables are shared with group_vars and validate.yml on purpose
+  - var-naming[no-role-prefix]

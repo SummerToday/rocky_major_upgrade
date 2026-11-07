@@ -340,6 +340,28 @@
         done
         for e in $(nonrpm_exes); do paths="${paths} $(scan_prefix "${e}")"; done
         paths=$(printf '%s\n' ${paths} | grep -v '^$' | sort -u)
+        if command -v semanage >/dev/null 2>&1; then
+          echo "### local fcontext rules: does the path still exist? (stale rules need not be migrated)"
+          semanage fcontext -l -C 2>/dev/null | awk '$1 ~ /^\// {print $1}' | while read -r rule; do
+            lit=$(printf '%s' "${rule}" | sed -E 's/[][(){}.*+?|^$\\].*$//')
+            if [ "${rule}" = "${lit}" ]; then
+              if [ -e "${rule}" ]; then st=EXISTS; else st=MISSING; fi
+            else
+              dir=$(dirname "${lit}")
+              if [ "${dir}" = "/" ]; then st=UNKNOWN; else
+                hit=$(timeout 20 find "${dir}" -maxdepth 6 -regextype posix-extended -regex "${rule}" 2>/dev/null | head -n 1)
+                if [ -n "${hit}" ]; then st=EXISTS; else st=MISSING; fi
+              fi
+            fi
+            echo "[${st}] ${rule}"
+          done
+        fi
+        echo "### SELinux domain of the web/WAS processes (confined domain = the rules above apply)"
+        ps -eo pid=,user=,label=,comm=,args= 2>/dev/null | awk '$4 ~ /^(httpd|apache2|nginx|java)$/' | cut -c1-200 | head -n 20
+        echo "### directory layout and symlinks around the application paths"
+        for d in $(for p in ${paths}; do dirname "${p}"; done | sort -u); do
+          echo "-- ${d}"; ls -l "${d}" 2>&1 | head -n 40
+        done
         echo "### labels of discovered application paths"
         for p in ${paths}; do
           [ -d "${p}" ] || continue
@@ -373,6 +395,18 @@
         echo "### firewalld"
         if systemctl is-active firewalld >/dev/null 2>&1; then
           firewall-cmd --list-all 2>&1 | head -n 30
+          allowed=$(firewall-cmd --list-ports 2>/dev/null)
+          for svc in $(firewall-cmd --list-services 2>/dev/null); do
+            allowed="${allowed} $(firewall-cmd --permanent --service="${svc}" --get-ports 2>/dev/null)"
+          done
+          echo "### listening TCP ports reachable from outside vs firewalld (default zone only, rich rules not evaluated)"
+          ss -lntH 2>/dev/null | awk '{print $4}' | grep -vE '^(127\.|\[::1\]|\[::ffff:127\.)' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un | while read -r port; do
+            if echo " ${allowed} " | grep -qE "[[:space:]]${port}/tcp[[:space:]]"; then
+              echo "[allowed]     ${port}/tcp"
+            else
+              echo "[NOT-ALLOWED] ${port}/tcp is listening but firewalld does not allow it"
+            fi
+          done
         else
           echo "(firewalld is not running)"
         fi
@@ -388,18 +422,22 @@
         {{ shell_helpers }}
         echo "### RPMs whose vendor is not Rocky (third-party packages)"
         rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\t%{VENDOR}\n' 2>/dev/null \
-          | grep -vE '^gpg-pubkey|Rocky Enterprise Software Foundation|Rocky Linux' | sort
+          | awk -F'\t' '$1 !~ /^gpg-pubkey/ && $2 !~ /^Rocky/' | sort
         echo "### repositories"
         grep -hE '^(\[|baseurl|mirrorlist|metalink|enabled|gpgcheck)' /etc/yum.repos.d/*.repo 2>/dev/null
         echo "### files under /usr/local"
         find /usr/local -mindepth 2 -maxdepth 3 \( -type f -o -type l \) 2>/dev/null | head -n 60
-        echo "### custom systemd units in /etc/systemd/system"
+        echo "### custom systemd units in /etc/systemd/system (full definition, secrets masked)"
         units=$(find /etc/systemd/system -maxdepth 1 -type f \
           \( -name '*.service' -o -name '*.timer' -o -name '*.socket' -o -name '*.mount' \) 2>/dev/null | sort)
         for u in ${units}; do
-          echo "-- ${u}"
-          grep -hE '^(ExecStart|ExecStop|User|Group|WorkingDirectory|Environment|EnvironmentFile|LimitNOFILE|LimitNPROC)' "${u}" | mask
-          grep -hE '^(Restart|After|Requires|OnCalendar|CPUShares|MemoryLimit)' "${u}"
+          name=$(basename "${u}")
+          echo "-- ${name}: enabled=$(systemctl is-enabled "${name}" 2>&1) active=$(systemctl is-active "${name}" 2>&1)"
+          systemctl cat "${name}" --no-pager 2>&1 | grep -vE '^[[:space:]]*$' | mask
+          systemctl show "${name}" -p Type -p User -p Group -p LimitNOFILE -p PIDFile -p MainPID 2>&1
+          grep -hE '^Exec(Start|Stop)=' "${u}" | sed -E 's/^Exec[A-Za-z]+=[-+@!:]*//' | awk '{print $1}' | sort -u | while read -r x; do
+            echo "exec path: ${x} -> $(readlink -f "${x}" 2>&1)"
+          done
         done
         exit 0
       args:
@@ -418,14 +456,20 @@
           | grep -vE ' (hugetlbfs|configfs|fusectl|autofs|binfmt_misc|rpc_pipefs|nsfs) '
         echo "### disk usage"
         df -hT -x tmpfs -x devtmpfs 2>&1
-        echo "### accounts of listening processes (uid/gid must match on the new VM) and their limits"
+        echo "### accounts of listening programs (uid/gid must match on the new VM) and their limits"
         seen=""
         for pid in $(listen_pids); do
           exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
           case " ${seen} " in *" ${exe} "*) continue ;; esac
           seen="${seen} ${exe}"
-          user=$(ps -o user= -p "${pid}" 2>/dev/null | tr -d ' ')
-          echo "-- $(basename "${exe}") pid=${pid} $(id "${user}" 2>&1)"
+          pids=$(for q in /proc/[0-9]*; do
+            if [ "$(readlink -f "${q}/exe" 2>/dev/null)" = "${exe}" ]; then echo "${q#/proc/}"; fi
+          done | paste -sd, -)
+          echo "-- $(basename "${exe}") pids=${pids}"
+          for user in $(ps -o user= -p "${pids}" 2>/dev/null | sort -u); do
+            echo "   user ${user}: $(id "${user}" 2>&1)"
+            echo "   passwd: $(getent passwd "${user}")"
+          done
           grep -E '^Max (open files|processes)' "/proc/${pid}/limits" 2>/dev/null
         done
         exit 0

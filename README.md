@@ -84,10 +84,10 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 | cgroup v1 경로 | systemd unit, cron, `/usr/local/bin`, 직접 설치 프로그램과 Tomcat bin 디렉터리 스캔 (CPUShares, MemoryLimit 포함) |
 | Java cgroup v2 | 리슨 중인 java와 설치된 JDK 버전 판정 (8u372+, 11.0.16+, 15+) |
 | OS 패키지 변경 | `rpm -Va`(기본 켜짐, `nice`로 실행). 설정 파일(`c`) 변경 목록과 내용을 보여주고, 바뀐 파일 종류에 따라 후속 명령을 자동 실행 |
-| SELinux | 모드, `semanage` 로컬 규칙(fcontext/boolean/port), 앱 경로 라벨, `restorecon -Rnv` 드라이런(변경 없음), 부팅 이후 AVC 거부 |
-| 부팅·암호·방화벽 | 커널 cmdline, cgroup 모드(v1/v2), crypto policy, firewalld 규칙 |
-| OS 패키지 밖 항목 | 벤더가 Rocky가 아닌 RPM, 저장소 설정, `/usr/local` 파일, 직접 만든 systemd unit |
-| 마운트·계정 | fstab, 마운트된 파일시스템, 리슨 프로세스의 실행 계정(uid/gid)과 limit |
+| SELinux | 모드, `semanage` 로컬 규칙(fcontext/boolean/port)과 **규칙 경로의 현존 여부(EXISTS/MISSING, 오래된 규칙 식별)**, 웹/WAS 프로세스의 SELinux 도메인, 앱 경로 라벨·심볼릭 링크, `restorecon -Rnv` 드라이런(변경 없음), 부팅 이후 AVC 거부 |
+| 부팅·암호·방화벽 | 커널 cmdline, cgroup 모드(v1/v2), crypto policy, firewalld 규칙과 **리슨 포트별 허용 여부(`NOT-ALLOWED` 표시)** |
+| OS 패키지 밖 항목 | 벤더가 Rocky가 아닌 RPM, 저장소 설정, `/usr/local` 파일, 직접 만든 systemd unit의 **전체 정의·활성 상태·ExecStart 실제 경로(심볼릭 링크 해석)** |
+| 마운트·계정 | fstab, 마운트된 파일시스템, 리슨 프로그램의 **모든 실행 계정(워커 포함) uid/gid·passwd 항목**과 limit |
 | XFS | `findmnt -t xfs`로 마운트 탐색 후 `xfs_info` |
 
 `rpm -Va` 후속 점검 분기: `file_contexts.local`이 바뀌면 `semanage fcontext -l -C`, `/etc/ssh/*`이면 `sshd -T` 유효값, `/etc/systemd/*`이면 `systemd-delta`, `/etc/chrony*`이면 `chronyc sources`, `/etc/crypto-policies/*`이면 정책 표시, sudoers면 `visudo -c`, fstab이면 마운트 목록을 이어서 실행합니다. 시간이 오래 걸리면 `collect_rpm_va: false`로 끄거나 `rpm_va_timeout`(기본 900초)을 조정하세요.

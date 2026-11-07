@@ -493,6 +493,133 @@
       changed_when: false
       failed_when: false
 
+    - name: Server sizing and identity (basis for the size of the new VM)
+      ansible.builtin.shell: |
+        echo "### host"; hostnamectl 2>/dev/null | grep -E 'Static hostname|Chassis|Virtualization|Operating System' | sed -E 's/^[[:space:]]+//'
+        echo "virtualization: $(systemd-detect-virt 2>&1)"
+        echo "### cpu"; lscpu 2>/dev/null | grep -E '^(Model name|CPU\(s\)|Socket\(s\)|Core\(s\) per socket|Thread\(s\) per core|Architecture)'
+        echo "### memory (MiB)"; free -m 2>&1
+        echo "### swap"; swapon --show 2>&1
+        echo "### uptime"; uptime 2>&1
+        exit 0
+      args:
+        executable: /bin/bash
+      register: sizing_info
+      changed_when: false
+      failed_when: false
+
+    - name: Network details (addresses, routes, DNS, connections, ifcfg contents)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### addresses"; ip -br addr 2>&1
+        echo "### links (MAC and MTU)"
+        ip -o link 2>/dev/null | awk '{
+          m = ""; a = ""
+          for (i = 1; i <= NF; i++) { if ($i == "mtu") m = $(i+1); if ($i == "link/ether") a = $(i+1) }
+          print $2, "mtu=" m, "mac=" a }'
+        echo "### routes"; ip route 2>&1
+        echo "### policy routing rules"; ip rule 2>&1 | grep -v -E '^(0|32766|32767):' || true
+        echo "### DNS (resolv.conf)"; strip_conf /etc/resolv.conf 2>&1
+        echo "### hosts"; strip_conf /etc/hosts 2>&1
+        echo "### NetworkManager connections"; nmcli -t -f NAME,DEVICE,TYPE,AUTOCONNECT connection show 2>&1
+        for f in /etc/sysconfig/network-scripts/ifcfg-*; do
+          [ -f "${f}" ] || continue
+          echo "-- ${f}"; strip_conf "${f}" | mask
+        done
+        echo "### ifcfg-related extras"
+        strip_conf /etc/sysconfig/network 2>/dev/null
+        ls /etc/sysconfig/network-scripts/route-* /etc/sysconfig/network-scripts/rule-* 2>/dev/null
+        exit 0
+      args:
+        executable: /bin/bash
+      register: network_info
+      changed_when: false
+      failed_when: false
+
+    - name: Files under /etc that no RPM owns (rpm -Va cannot see these) with their contents
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        skip='^/etc/(machine-id|ssh/ssh_host_|\.pwd\.lock|lvm/(archive|backup)/|selinux/targeted/(active|policy)|pki/ca-trust/extracted|'
+        skip="${skip}ld\.so\.cache|udev/hwdb\.bin|sos/|shadow|gshadow|passwd-|group-|subuid|subgid|pki/nssdb|NetworkManager/system-connections/)"
+        list=$(comm -13 <(rpm -qla 2>/dev/null | sort -u) <(find /etc -xdev -type f 2>/dev/null | sort) | grep -vE "${skip}")
+        echo "### unowned files in /etc: $(printf '%s\n' "${list}" | grep -c .) (first 200)"
+        printf '%s\n' "${list}" | head -n 200
+        echo "### contents of unowned text files (<64KB, comments stripped, secrets masked, max 40 files)"
+        n=0
+        for f in $(printf '%s\n' "${list}" | grep -vE '\.(pem|crt|key|jks|p12|keytab)$'); do
+          [ "$(stat -c %s "${f}")" -lt 65536 ] || continue
+          grep -Iq . "${f}" || continue
+          n=$((n + 1)); [ "${n}" -gt 40 ] && { echo "(more files: rest omitted)"; break; }
+          echo "-- ${f}"; strip_conf "${f}" | mask | head -n 40
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: unowned_etc
+      changed_when: false
+      failed_when: false
+
+    - name: Data sizes of the application directories and common data locations (basis for the copy plan)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        paths=""
+        web=$(find_web_bin "{{ apache_bin_override }}")
+        if [ -n "${web}" ] && [ "$(basename "${web}")" != "nginx" ]; then paths="${paths} $(apache_root "${web}")"; fi
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          paths="${paths} $(echo "${t}" | cut -d'|' -f2) $(echo "${t}" | cut -d'|' -f3)"
+        done
+        for e in $(nonrpm_exes); do paths="${paths} $(scan_prefix "${e}")"; done
+        echo "### application paths (symlinks resolved)"
+        for p in $(printf '%s\n' ${paths} | sort -u); do
+          [ -e "${p}" ] && timeout 120 du -xsh "$(readlink -f "${p}")" 2>/dev/null
+        done | sort -u
+        echo "### children of the parent directories (largest first)"
+        for d in $(for p in ${paths}; do dirname "${p}"; done | sort -u); do
+          [ "${d}" = "/" ] && continue
+          echo "-- ${d}"
+          for c in "${d}"/*; do readlink -f "${c}"; done 2>/dev/null | sort -u | while read -r c; do
+            timeout 120 du -xsh "${c}" 2>/dev/null
+          done | sort -rh | head -n 20
+        done
+        echo "### Tomcat webapps"
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          b=$(echo "${t}" | cut -d'|' -f2); du -xsh "${b}"/webapps/* 2>/dev/null | sort -rh | head -n 20
+        done
+        echo "### common data locations"
+        du -xsh /var/log /var/lib /home /opt /srv /var/spool 2>/dev/null
+        exit 0
+      args:
+        executable: /bin/bash
+      register: data_sizes
+      changed_when: false
+      failed_when: false
+
+    - name: Local accounts that must exist on the new VM (human users, sudo rights, key counts)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### accounts with uid >= 1000 or a login shell"
+        awk -F: '($3 >= 1000 && $3 < 60000) || ($3 < 1000 && $7 !~ /(nologin|false|sync|shutdown|halt)$/) {print $1":"$3":"$4":"$6":"$7}' /etc/passwd
+        echo "### groups with members (wheel, docker, etc.)"
+        awk -F: '$4 != "" {print $1":"$3":"$4}' /etc/group
+        echo "### sudoers (comments stripped)"
+        for f in /etc/sudoers /etc/sudoers.d/*; do
+          [ -f "${f}" ] || continue
+          echo "-- ${f}"; strip_conf "${f}" | mask
+        done
+        echo "### number of authorized_keys entries per login user (keys themselves are not read)"
+        awk -F: '($3 >= 1000 && $3 < 60000) || $3 == 0 {print $1" "$6}' /etc/passwd | while read -r u h; do
+          f="${h}/.ssh/authorized_keys"
+          if [ -f "${f}" ]; then echo "${u}: $(grep -cvE '^[[:space:]]*(#|$)' "${f}") key(s)"; else echo "${u}: none"; fi
+        done
+        echo "### password and lock status (no hashes)"
+        awk -F: '($3 >= 1000 && $3 < 60000) {print $1}' /etc/passwd | while read -r u; do passwd -S "${u}" 2>&1; done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: accounts_info
+      changed_when: false
+      failed_when: false
+
     - name: Show collected results
       ansible.builtin.debug:
         msg:
@@ -517,3 +644,8 @@
           boot_cgroup_crypto_firewall: "{{ boot_info.stdout_lines }}"
           outside_os_packages: "{{ non_rpm_info.stdout_lines }}"
           mounts_and_accounts: "{{ mounts_info.stdout_lines }}"
+          server_sizing: "{{ sizing_info.stdout_lines }}"
+          network_details: "{{ network_info.stdout_lines }}"
+          unowned_etc_files: "{{ unowned_etc.stdout_lines }}"
+          data_sizes: "{{ data_sizes.stdout_lines }}"
+          local_accounts: "{{ accounts_info.stdout_lines }}"

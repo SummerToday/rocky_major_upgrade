@@ -87,6 +87,10 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 | SELinux | 모드, `semanage` 로컬 규칙(fcontext/boolean/port)과 **규칙 경로의 현존 여부(EXISTS/MISSING, 오래된 규칙 식별)**, 웹/WAS 프로세스의 SELinux 도메인, 앱 경로 라벨·심볼릭 링크, `restorecon -Rnv` 드라이런(변경 없음), 부팅 이후 AVC 거부 |
 | 부팅·암호·방화벽 | 커널 cmdline, cgroup 모드(v1/v2), crypto policy, firewalld 규칙과 **리슨 포트별 허용 여부(`NOT-ALLOWED` 표시)** |
 | OS 패키지 밖 항목 | 벤더가 Rocky가 아닌 RPM, 저장소 설정, `/usr/local` 파일, 소스 빌드 옵션(`config.nice`), 직접 만든 systemd unit의 **전체 정의·활성 상태·ExecStart 실제 경로(심볼릭 링크 해석)** |
+| 서버 사양·네트워크 | CPU/메모리/스왑/가상화, IP·MAC·MTU·라우트·DNS, NetworkManager 연결과 ifcfg 내용 |
+| RPM 비소유 `/etc` 파일 | `rpm -Va`가 못 보는, 사람이 새로 만든 설정 파일(`sysctl.d`, `limits.d`, `logrotate.d` 등) 목록과 내용 |
+| 데이터 크기 | 앱 경로(심볼릭 링크 해석)와 상위 디렉터리 하위 항목, Tomcat webapps, `/var/log` 등 용량 |
+| 로컬 계정 | uid 1000 이상·로그인 가능 계정, 그룹 멤버, sudoers, authorized_keys 개수(키 내용은 읽지 않음), 잠금 상태 |
 | 마운트·계정 | fstab, 마운트된 파일시스템, 리슨 프로그램의 **모든 실행 계정(워커 포함) uid/gid·passwd 항목**과 limit |
 | XFS | `findmnt -t xfs`로 마운트 탐색 후 `xfs_info` |
 

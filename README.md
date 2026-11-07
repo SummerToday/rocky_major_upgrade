@@ -83,7 +83,14 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 | 인증서 | Apache/Nginx/Tomcat 설정에서 추출 + `/etc/pki/tls/certs`, `/etc/httpd`, `/etc/nginx`, 설치 디렉터리 스캔 → SHA-1/MD5, 2048bit 미만 판정과 만료일 |
 | cgroup v1 경로 | systemd unit, cron, `/usr/local/bin`, 직접 설치 프로그램과 Tomcat bin 디렉터리 스캔 (CPUShares, MemoryLimit 포함) |
 | Java cgroup v2 | 리슨 중인 java와 설치된 JDK 버전 판정 (8u372+, 11.0.16+, 15+) |
+| OS 패키지 변경 | `rpm -Va`(기본 켜짐, `nice`로 실행). 설정 파일(`c`) 변경 목록과 내용을 보여주고, 바뀐 파일 종류에 따라 후속 명령을 자동 실행 |
+| SELinux | 모드, `semanage` 로컬 규칙(fcontext/boolean/port), 앱 경로 라벨, `restorecon -Rnv` 드라이런(변경 없음), 부팅 이후 AVC 거부 |
+| 부팅·암호·방화벽 | 커널 cmdline, cgroup 모드(v1/v2), crypto policy, firewalld 규칙 |
+| OS 패키지 밖 항목 | 벤더가 Rocky가 아닌 RPM, 저장소 설정, `/usr/local` 파일, 직접 만든 systemd unit |
+| 마운트·계정 | fstab, 마운트된 파일시스템, 리슨 프로세스의 실행 계정(uid/gid)과 limit |
 | XFS | `findmnt -t xfs`로 마운트 탐색 후 `xfs_info` |
+
+`rpm -Va` 후속 점검 분기: `file_contexts.local`이 바뀌면 `semanage fcontext -l -C`, `/etc/ssh/*`이면 `sshd -T` 유효값, `/etc/systemd/*`이면 `systemd-delta`, `/etc/chrony*`이면 `chronyc sources`, `/etc/crypto-policies/*`이면 정책 표시, sudoers면 `visudo -c`, fstab이면 마운트 목록을 이어서 실행합니다. 시간이 오래 걸리면 `collect_rpm_va: false`로 끄거나 `rpm_va_timeout`(기본 900초)을 조정하세요.
 
 탐색 결과의 한계: 실행 중이 아닌 프로그램, 64KB 초과 인증서 파일, 깊이 6 초과 경로는 놓칩니다. 이때만 추가 변수를 사용하세요.
 

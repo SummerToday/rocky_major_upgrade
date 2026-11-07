@@ -4,6 +4,7 @@
 # Everything is discovered on the server itself (running processes, listening ports,
 # mounts, server configuration), so no path has to be typed in. The variables
 # binary_paths / cert_paths / script_dirs / xfs_mount_points are optional additions.
+# Changed OS package files trigger follow-up checks automatically (see "Package drift").
 # Results stay in the job output: the EE container is removed after the job.
 # Download the output via the API if needed: /api/v2/jobs/<id>/stdout/?format=txt
 - name: Collect compatibility data from the old VM
@@ -17,7 +18,8 @@
     xfs_mount_points: []      # optional: extra mount points for xfs_info
     apache_bin_override: ""   # set only when the web server is not found behind a listening port
     tomcat_home_override: ""  # set only when Tomcat is not found behind a listening port
-    collect_rpm_va: false     # rpm -Va output is long; enable only when needed
+    collect_rpm_va: true      # verify all RPM-owned files (niced, read-only); false skips it
+    rpm_va_timeout: 900       # seconds before rpm -Va is stopped (partial output is kept)
   tasks:
     - name: OS release
       ansible.builtin.command: cat /etc/rocky-release
@@ -238,11 +240,200 @@
       register: listen_ports
       changed_when: false
 
-    - name: Files changed from the OS packages (rpm -Va)  # noqa: command-instead-of-module
-      ansible.builtin.shell: rpm -Va 2>&1 || true
-      register: rpm_va_result
+    - name: Package drift (rpm -Va) with automatic follow-up checks per changed file
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        out=$(nice -n 19 timeout {{ rpm_va_timeout }} rpm -Va 2>&1)
+        rc=$?
+        [ "${rc}" = "124" ] && echo "(rpm -Va stopped after {{ rpm_va_timeout }}s: the output is partial)"
+        cfg=$(printf '%s\n' "${out}" | grep -E '^[^ ]{9} +c ' || true)
+        miss=$(printf '%s\n' "${out}" | grep -E '^missing' || true)
+        other=$(printf '%s\n' "${out}" | grep -vE '^[^ ]{9} +c |^missing' | grep . || true)
+        n_cfg=$(printf '%s\n' "${cfg}" | grep -c .)
+        n_miss=$(printf '%s\n' "${miss}" | grep -c .)
+        n_other=$(printf '%s\n' "${other}" | grep -c .)
+        echo "### summary: config_changed=${n_cfg} missing=${n_miss} other_changed=${n_other}"
+        echo "### config files changed (c = configuration file, edited after install)"
+        printf '%s\n' "${cfg}" | grep .
+        echo "### missing files"
+        printf '%s\n' "${miss}" | grep .
+        echo "### other changed files (binaries, libraries; first 50)"
+        printf '%s\n' "${other}" | grep . | head -n 50
+        echo "### content of changed config files (comments stripped, secrets masked)"
+        n=0
+        for f in $(printf '%s\n' "${cfg}" | awk 'NF {print $NF}'); do
+          n=$((n + 1))
+          if [ "${n}" -gt 40 ]; then echo "(more than 40 files: the rest is omitted)"; break; fi
+          case "${f}" in
+            */file_contexts.local) f_selinux=1 ;;
+            /etc/ssh/*) f_ssh=1 ;;
+            /etc/systemd/*) f_systemd=1 ;;
+            /etc/chrony*) f_chrony=1 ;;
+            /etc/crypto-policies/*) f_crypto=1 ;;
+            /etc/sudoers|/etc/sudoers.d/*) f_sudo=1 ;;
+            /etc/fstab) f_fstab=1 ;;
+          esac
+          [ -f "${f}" ] || continue
+          if [ "$(stat -c %s "${f}")" -ge 65536 ]; then echo "-- ${f} (larger than 64KB, skipped)"; continue; fi
+          if ! grep -Iq . "${f}"; then echo "-- ${f} (empty or binary, skipped)"; continue; fi
+          echo "-- ${f}"; strip_conf "${f}" | mask | head -n 80
+        done
+        echo "### follow-up checks chosen from the changed files"
+        if [ -n "${f_selinux}" ]; then
+          echo "-- SELinux local rules changed: semanage fcontext -l -C"
+          if command -v semanage >/dev/null 2>&1; then semanage fcontext -l -C 2>&1 | head -n 60; else echo "(semanage not installed)"; fi
+        fi
+        if [ -n "${f_ssh}" ]; then
+          echo "-- sshd configuration changed: effective values"
+          ssh_keys='permitrootlogin|passwordauthentication|pubkeyauthentication|port|allowusers|allowgroups|clientaliveinterval'
+          ssh_keys="${ssh_keys}|ciphers|macs|kexalgorithms|hostkeyalgorithms|pubkeyacceptedalgorithms"
+          sshd -T 2>&1 | grep -iE "^(${ssh_keys}) "
+        fi
+        if [ -n "${f_systemd}" ]; then
+          echo "-- systemd configuration changed: systemd-delta"
+          systemd-delta --no-pager --type=overridden,extended 2>&1 | head -n 50
+        fi
+        if [ -n "${f_chrony}" ]; then
+          echo "-- chrony configuration changed: time sources"
+          chronyc sources 2>&1 | head -n 10
+        fi
+        if [ -n "${f_crypto}" ]; then
+          echo "-- crypto policy changed: current policy"
+          update-crypto-policies --show 2>&1
+        fi
+        if [ -n "${f_sudo}" ]; then
+          echo "-- sudoers changed: syntax check"
+          visudo -c 2>&1 | head -n 10
+        fi
+        if [ -n "${f_fstab}" ]; then
+          echo "-- fstab changed: current mounts of non-pseudo filesystems"
+          findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>&1 | grep -E ' (xfs|ext[234]|nfs[34]?|cifs|btrfs|vfat) ' | head -n 30
+        fi
+        exit 0
+      args:
+        executable: /bin/bash
+      register: package_drift
       changed_when: false
+      failed_when: false
       when: collect_rpm_va | bool
+
+    - name: SELinux details that rpm -Va cannot see (mode, local rules, labels, dry-run relabel, denials)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        mode=$(getenforce 2>/dev/null || echo unknown)
+        echo "mode: ${mode}"
+        sestatus 2>/dev/null | head -n 12
+        echo "### local customisations (semanage)"
+        if command -v semanage >/dev/null 2>&1; then
+          echo "-- fcontext"; semanage fcontext -l -C 2>&1 | head -n 60
+          echo "-- boolean"; semanage boolean -l -C 2>&1 | head -n 30
+          echo "-- port"; semanage port -l -C 2>&1 | head -n 30
+        else
+          echo "(semanage not installed: policycoreutils-python-utils) local file contexts file:"
+          strip_conf /etc/selinux/targeted/contexts/files/file_contexts.local 2>/dev/null
+        fi
+        paths=""
+        web=$(find_web_bin "{{ apache_bin_override }}")
+        if [ -n "${web}" ] && [ "$(basename "${web}")" != "nginx" ]; then paths="${paths} $(apache_root "${web}")"; fi
+        for t in $(tomcat_targets "{{ tomcat_home_override }}"); do
+          paths="${paths} $(echo "${t}" | cut -d'|' -f2) $(echo "${t}" | cut -d'|' -f3)"
+        done
+        for e in $(nonrpm_exes); do paths="${paths} $(scan_prefix "${e}")"; done
+        paths=$(printf '%s\n' ${paths} | grep -v '^$' | sort -u)
+        echo "### labels of discovered application paths"
+        for p in ${paths}; do
+          [ -d "${p}" ] || continue
+          ls -Zd "${p}" 2>&1
+          ls -Z "${p}" 2>&1 | head -n 12
+        done
+        if [ "${mode}" != "Disabled" ]; then
+          echo "### dry-run relabel (restorecon -Rnv changes nothing): entries that differ from the policy"
+          for p in ${paths}; do
+            [ -d "${p}" ] || continue
+            echo "-- ${p}"; timeout 120 restorecon -Rnv "${p}" 2>&1 | head -n 30
+          done
+          echo "### AVC denials since boot (last 20)"
+          ausearch -m AVC,USER_AVC -ts boot -i 2>&1 | tail -n 20
+        fi
+        exit 0
+      args:
+        executable: /bin/bash
+      register: selinux_info
+      changed_when: false
+      failed_when: false
+
+    - name: Boot parameters, cgroup mode, crypto policy and firewall
+      ansible.builtin.shell: |
+        echo "kernel cmdline: $(cat /proc/cmdline)"
+        if grep -qE 'systemd.unified_cgroup_hierarchy=0|cgroup_no_v1' /proc/cmdline; then
+          echo "[REVIEW] cmdline forces a cgroup mode; Rocky 9 uses cgroup v2 only"
+        fi
+        echo "cgroup filesystem: $(stat -fc %T /sys/fs/cgroup 2>&1) (cgroup2fs = v2, tmpfs = v1)"
+        echo "crypto policy: $(update-crypto-policies --show 2>&1)"
+        echo "### firewalld"
+        if systemctl is-active firewalld >/dev/null 2>&1; then
+          firewall-cmd --list-all 2>&1 | head -n 30
+        else
+          echo "(firewalld is not running)"
+        fi
+        exit 0
+      args:
+        executable: /bin/bash
+      register: boot_info
+      changed_when: false
+      failed_when: false
+
+    - name: Software and units outside the OS packages (third-party RPMs, repositories, /usr/local, custom units)
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### RPMs whose vendor is not Rocky (third-party packages)"
+        rpm -qa --qf '%{NAME}-%{VERSION}-%{RELEASE}.%{ARCH}\t%{VENDOR}\n' 2>/dev/null \
+          | grep -vE '^gpg-pubkey|Rocky Enterprise Software Foundation|Rocky Linux' | sort
+        echo "### repositories"
+        grep -hE '^(\[|baseurl|mirrorlist|metalink|enabled|gpgcheck)' /etc/yum.repos.d/*.repo 2>/dev/null
+        echo "### files under /usr/local"
+        find /usr/local -mindepth 2 -maxdepth 3 \( -type f -o -type l \) 2>/dev/null | head -n 60
+        echo "### custom systemd units in /etc/systemd/system"
+        units=$(find /etc/systemd/system -maxdepth 1 -type f \
+          \( -name '*.service' -o -name '*.timer' -o -name '*.socket' -o -name '*.mount' \) 2>/dev/null | sort)
+        for u in ${units}; do
+          echo "-- ${u}"
+          grep -hE '^(ExecStart|ExecStop|User|Group|WorkingDirectory|Environment|EnvironmentFile|LimitNOFILE|LimitNPROC)' "${u}" | mask
+          grep -hE '^(Restart|After|Requires|OnCalendar|CPUShares|MemoryLimit)' "${u}"
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: non_rpm_info
+      changed_when: false
+      failed_when: false
+
+    - name: Mounts, fstab, service accounts and their limits
+      ansible.builtin.shell: |
+        {{ shell_helpers }}
+        echo "### fstab"; strip_conf /etc/fstab 2>/dev/null
+        echo "### mounted non-pseudo filesystems"
+        findmnt -rn -o TARGET,SOURCE,FSTYPE,OPTIONS 2>/dev/null \
+          | grep -vE ' (proc|sysfs|devtmpfs|devpts|tmpfs|cgroup2?|securityfs|selinuxfs|pstore|bpf|debugfs|tracefs|mqueue) '\
+          | grep -vE ' (hugetlbfs|configfs|fusectl|autofs|binfmt_misc|rpc_pipefs|nsfs) '
+        echo "### disk usage"
+        df -hT -x tmpfs -x devtmpfs 2>&1
+        echo "### accounts of listening processes (uid/gid must match on the new VM) and their limits"
+        seen=""
+        for pid in $(listen_pids); do
+          exe=$(readlink -f "/proc/${pid}/exe" 2>/dev/null)
+          case " ${seen} " in *" ${exe} "*) continue ;; esac
+          seen="${seen} ${exe}"
+          user=$(ps -o user= -p "${pid}" 2>/dev/null | tr -d ' ')
+          echo "-- $(basename "${exe}") pid=${pid} $(id "${user}" 2>&1)"
+          grep -E '^Max (open files|processes)' "/proc/${pid}/limits" 2>/dev/null
+        done
+        exit 0
+      args:
+        executable: /bin/bash
+      register: mounts_info
+      changed_when: false
+      failed_when: false
 
     - name: Show collected results
       ansible.builtin.debug:
@@ -263,4 +454,8 @@
           filesystems: "{{ lsblk_result.stdout_lines }}"
           xfs_flags: "{{ xfs_info_out.stdout_lines }}"
           listen_ports: "{{ listen_ports.stdout_lines }}"
-          rpm_va: "{{ rpm_va_result.stdout_lines | default([]) }}"
+          package_drift: "{{ package_drift.stdout_lines | default([]) }}"
+          selinux: "{{ selinux_info.stdout_lines }}"
+          boot_cgroup_crypto_firewall: "{{ boot_info.stdout_lines }}"
+          outside_os_packages: "{{ non_rpm_info.stdout_lines }}"
+          mounts_and_accounts: "{{ mounts_info.stdout_lines }}"

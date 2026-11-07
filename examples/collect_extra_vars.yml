@@ -23,5 +23,6 @@
 # apache_bin_override: /path/to/httpd
 # tomcat_home_override: /path/to/tomcat
 
-# Print rpm -Va (long output)
-# collect_rpm_va: true
+# rpm -Va package drift check is ON by default; set false to skip it, or limit its run time
+# collect_rpm_va: false
+# rpm_va_timeout: 900

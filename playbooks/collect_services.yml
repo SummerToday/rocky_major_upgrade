@@ -222,6 +222,7 @@
     - name: Measure the response baseline (listening ports and webapp paths are probed automatically)
       ansible.builtin.shell: |
         {{ shell_helpers }}
+        command -v curl >/dev/null 2>&1 || { echo "(curl is not installed on this host: install it to measure the baseline)"; exit 0; }
         urls=""
         ports=$(ss -lntH 2>/dev/null | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -un)
         for port in ${ports}; do
@@ -247,7 +248,17 @@
           done
         done
         urls=$(printf '%s\n' ${urls} {{ health_urls | map('quote') | join(' ') }} | grep -v '^$' | sort -u)
-        [ -n "${urls}" ] || { echo "(no HTTP(S) responder found on the listening ports)"; exit 0; }
+        if [ -z "${urls}" ]; then
+          echo "(no HTTP(S) responder found on the listening ports)"
+          echo "ports tried: $(echo ${ports})"
+          for port in ${ports}; do
+            [ "${port}" = "22" ] && continue
+            printf 'port %s: http_code=' "${port}"
+            curl -ks -o /dev/null -m 3 -w '%{http_code}' "http://127.0.0.1:${port}/" 2>&1
+            echo " (curl exit $?)"
+          done
+          exit 0
+        fi
         for u in ${urls}; do
           for i in 1 2 3; do
             printf '%s ' "${u}"

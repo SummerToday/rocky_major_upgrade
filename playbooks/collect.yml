@@ -427,6 +427,20 @@
         grep -hE '^(\[|baseurl|mirrorlist|metalink|enabled|gpgcheck)' /etc/yum.repos.d/*.repo 2>/dev/null
         echo "### files under /usr/local"
         find /usr/local -mindepth 2 -maxdepth 3 \( -type f -o -type l \) 2>/dev/null | head -n 60
+        echo "### source-build options (config.nice) found next to the non-RPM programs"
+        dirs=""
+        for e in $(nonrpm_exes); do
+          p=$(scan_prefix "${e}")
+          [ -n "${p}" ] || continue
+          dirs="${dirs} ${p}"
+          [ "$(dirname "${p}")" != "/" ] && dirs="${dirs} $(dirname "${p}")"
+        done
+        for d in $(printf '%s\n' ${dirs} | sort -u); do
+          timeout 30 find "${d}" -maxdepth 3 -type f -name config.nice 2>/dev/null
+        done | sort -u | while read -r nice; do
+          echo "-- ${nice}"
+          grep -vE '^[[:space:]]*(#|$)' "${nice}" | mask | head -n 40
+        done
         echo "### custom systemd units in /etc/systemd/system (full definition, secrets masked)"
         units=$(find /etc/systemd/system -maxdepth 1 -type f \
           \( -name '*.service' -o -name '*.timer' -o -name '*.socket' -o -name '*.mount' \) 2>/dev/null | sort)

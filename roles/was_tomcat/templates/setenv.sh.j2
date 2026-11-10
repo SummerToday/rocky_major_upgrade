@@ -1,5 +1,8 @@
 #!/bin/sh
 # Managed by Ansible (rocky_major_upgrade). Do not edit by hand.
-# JVM options come from tomcat_java_opts in group_vars.
-JAVA_OPTS="{{ tomcat_java_opts }}"
-export JAVA_OPTS
+# Same variables as the old VM; the JVM options come from tomcat_java_opts in group_vars.
+export JAVA_HOME={{ java_home }}
+export CATALINA_HOME={{ tomcat_home }}
+export CATALINA_BASE={{ tomcat_home }}
+export CATALINA_PID={{ tomcat_home }}/temp/tomcat.pid
+export CATALINA_OPTS="{{ tomcat_java_opts }}"

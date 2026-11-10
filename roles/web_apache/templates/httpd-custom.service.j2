@@ -1,0 +1,24 @@
+# Managed by Ansible (rocky_major_upgrade). Do not edit by hand.
+# Mirrors the unit of the old VM (source-built Apache).
+[Unit]
+Description=Apache HTTP Server (source build)
+After=network-online.target remote-fs.target nss-lookup.target
+Wants=network-online.target
+
+[Service]
+RuntimeDirectory=httpd
+RuntimeDirectoryMode=0755
+Type=forking
+# Must match the PidFile directive in httpd.conf
+PIDFile={{ apache_pid_file }}
+ExecStart={{ apache_home_link }}/bin/apachectl -k start
+ExecReload={{ apache_home_link }}/bin/apachectl -k graceful
+ExecStop={{ apache_home_link }}/bin/apachectl -k graceful-stop
+TimeoutStopSec=60
+KillMode=mixed
+LimitNOFILE=65536
+PrivateTmp=true
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

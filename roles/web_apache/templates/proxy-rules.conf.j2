@@ -1,0 +1,8 @@
+# Managed by Ansible (rocky_major_upgrade). Do not edit by hand.
+LoadModule proxy_module modules/mod_proxy.so
+LoadModule proxy_http_module modules/mod_proxy_http.so
+ProxyPreserveHost On
+{% for rule in apache_proxy_rules %}
+ProxyPass        "{{ rule.path }}" "{{ rule.target }}"
+ProxyPassReverse "{{ rule.path }}" "{{ rule.target }}"
+{% endfor %}

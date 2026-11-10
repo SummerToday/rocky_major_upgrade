@@ -45,3 +45,11 @@
 - name: Set the time zone
   community.general.timezone:
     name: "{{ common_timezone }}"
+
+- name: Create the application data directory
+  ansible.builtin.file:
+    path: "{{ common_data_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"

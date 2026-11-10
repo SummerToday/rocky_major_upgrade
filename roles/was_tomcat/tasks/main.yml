@@ -15,15 +15,17 @@
 - name: Create the Tomcat group
   ansible.builtin.group:
     name: "{{ tomcat_group }}"
+    gid: "{{ tomcat_gid | default(omit) }}"
     system: true
 
 - name: Create the Tomcat user
   ansible.builtin.user:
     name: "{{ tomcat_user }}"
     group: "{{ tomcat_group }}"
+    uid: "{{ tomcat_uid | default(omit) }}"
     system: true
     shell: /sbin/nologin
-    home: "{{ tomcat_install_root }}"
+    home: "{{ tomcat_user_home }}"
     create_home: false
 
 - name: Download the Tomcat tarball
@@ -87,16 +89,32 @@
     mode: "u=rwX,g=rX,o="
     recurse: true
 
-- name: Label the Tomcat scripts as bin_t so systemd may execute them
+- name: Let Tomcat create its per-host context directory (conf/Catalina)
+  ansible.builtin.file:
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/conf/Catalina"
+    state: directory
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
+    mode: "0750"
+
+# The old VM labels the whole Tomcat tree and the stable symlink as bin_t
+- name: Label the Tomcat tree and the stable symlink as bin_t so systemd may execute the scripts
   community.general.sefcontext:
-    target: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin(/.*)?"
+    target: "{{ item }}"
     setype: bin_t
     state: present
+  loop:
+    - "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}(/.*)?"
+    - "{{ tomcat_home }}"
   register: tomcat_sefcontext
 
 - name: Apply the SELinux labels
   ansible.builtin.command:
-    argv: [restorecon, -Rv, "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin"]
+    argv:
+      - restorecon
+      - -Rv
+      - "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
+      - "{{ tomcat_home }}"
   register: tomcat_restorecon
   changed_when: tomcat_restorecon.stdout | length > 0
   when: tomcat_sefcontext is changed

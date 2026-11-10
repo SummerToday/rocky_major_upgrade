@@ -52,6 +52,14 @@
     - name: Gather service facts
       ansible.builtin.service_facts:
 
+    - name: Apache (source build) must be running
+      ansible.builtin.assert:
+        that:
+          - ansible_facts.services['httpd-custom.service'].state == 'running'
+        fail_msg: "httpd-custom.service is not running"
+        quiet: true
+      when: apache_enabled | default(true) | bool
+
     - name: Tomcat must be running
       ansible.builtin.assert:
         that:
@@ -61,7 +69,7 @@
       when: tomcat_enabled | default(true) | bool
 
     - name: Apache configuration must be valid
-      ansible.builtin.command: httpd -t
+      ansible.builtin.command: "{{ apache_httpd_bin | default('httpd') }} -t"
       register: httpd_test
       changed_when: false
       when: apache_enabled | default(true) | bool

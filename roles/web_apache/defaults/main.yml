@@ -1,7 +1,64 @@
 ---
-apache_server_name: "{{ inventory_hostname }}"
+# Apache is built from source on the new VM because the old binary links OpenSSL 1.1,
+# which Rocky 9 does not ship. The prefix and options mirror the old VM.
+apache_version: ""
+apache_tarball_url: ""
+apache_tarball_checksum: ""
+apache_user: apache
+apache_group: apache
+# Optional fixed ids so that file ownership matches the old VM (unset = automatic)
+# apache_uid: 990
+# apache_gid: 987
+apache_user_home: /data/httpd-data
+apache_install_root: /data
+apache_prefix: "{{ apache_install_root }}/apache-httpd-{{ apache_version }}"
+# Stable symlink used as ServerRoot and in the unit (version upgrades only move the link)
+apache_home_link: "{{ apache_install_root }}/httpd"
+apache_httpd_bin: "{{ apache_home_link }}/bin/httpd"
+apache_pid_file: /run/httpd/httpd.pid
+apache_server_name: localhost
 apache_http_port: 80
-# Reverse proxy rules: path on Apache -> backend URL
-apache_proxy_rules:
-  - path: /
-    target: "http://127.0.0.1:{{ tomcat_http_port | default(8080) }}/"
+apache_open_firewall_ports:
+  - "80/tcp"
+apache_build_dir: /var/tmp/httpd-build
+apache_build_packages:
+  - gcc
+  - make
+  - perl
+  - apr-devel
+  - apr-util-devel
+  - apr-util-openssl
+  - apr-util-ldap
+  - openldap-devel
+  - pcre2-devel
+  - openssl-devel
+  - expat-devel
+# apr-devel and apr-util-devel live in the CRB repository on Rocky 9
+apache_build_enablerepo: crb
+# Same configure options as the old VM (taken from build/config.nice)
+apache_configure_args:
+  - "--prefix={{ apache_prefix }}"
+  - "--with-mpm=event"
+  - "--enable-so"
+  - "--enable-ssl"
+  - "--enable-rewrite"
+  - "--enable-proxy"
+  - "--enable-proxy-ajp"
+  - "--enable-headers"
+  - "--enable-deflate"
+  - "--enable-mods-shared=most"
+# Same SELinux booleans and file contexts as the old VM
+apache_selinux_booleans:
+  - httpd_can_network_connect
+apache_selinux_fcontexts:
+  - { target: "{{ apache_prefix }}/bin(/.*)?", setype: httpd_exec_t }
+  - { target: "{{ apache_prefix }}/modules(/.*)?", setype: httpd_modules_t }
+  - { target: "{{ apache_prefix }}/conf(/.*)?", setype: httpd_config_t }
+  - { target: "{{ apache_prefix }}/logs(/.*)?", setype: httpd_log_t }
+  - { target: "{{ apache_prefix }}/htdocs(/.*)?", setype: httpd_sys_content_t }
+  - { target: "{{ apache_prefix }}/(error|icons|manual)(/.*)?", setype: httpd_sys_content_t }
+  - { target: "{{ apache_prefix }}/cgi-bin(/.*)?", setype: httpd_sys_script_exec_t }
+  - { target: "{{ apache_home_link }}", setype: usr_t }
+# Optional reverse proxy rules (path on Apache -> backend URL). The old VM has none:
+# Apache and Tomcat answer on their own ports. Rules load mod_proxy and mod_proxy_http.
+apache_proxy_rules: []

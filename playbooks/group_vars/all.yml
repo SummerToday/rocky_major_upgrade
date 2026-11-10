@@ -16,8 +16,8 @@ rollback_old_connect_ip: ""   # IP used to reach the old VM during rollback; fal
 cutover_health_url: ""    # full URL of the service address, checked from the EE after cutover
 
 # --- Validation (used by validate.yml) ---
-# Listening TCP ports recorded on the old VM (baseline), for example [22, 80, 443, 8080]
-baseline_ports: []
+# Listening TCP ports recorded on the old VM (baseline): sshd, Apache, Tomcat HTTP and Tomcat shutdown
+baseline_ports: [22, 80, 8080, 8005]
 # Health checks executed on the new VM, for example:
 #   - url: http://localhost:8080/health
 #     status: 200

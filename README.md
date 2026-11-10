@@ -19,9 +19,9 @@ playbooks/
   rollback_ip.yml                 # IP 원복 롤백 (선택)
   group_vars/                     # 비밀값 없는 변수만 (all.yml에 수집용 셸 함수 shell_helpers 포함)
 roles/
-  common_rocky9/                  # Rocky 9 기본 설정, gratuitous ARP sysctl
-  was_tomcat/                     # JDK + Tomcat 신규 설치, systemd, webapps
-  web_apache/                     # httpd + reverse proxy
+  common_rocky9/                  # Rocky 9 기본 설정, gratuitous ARP sysctl, /data 디렉터리
+  was_tomcat/                     # JDK + Tomcat 신규 설치(/data 기준), 고정 uid/gid, SELinux 라벨, systemd, webapps
+  web_apache/                     # httpd 소스 빌드(구 VM과 같은 configure 옵션), httpd-custom.service, SELinux 규칙
   batch_control/                  # 배치 타이머/crond 활성·비활성
 examples/                         # AWX에 넣을 Extra Variables 예시
 ```
@@ -100,7 +100,7 @@ examples/                         # AWX에 넣을 Extra Variables 예시
 
 ## 주의 사항
 
-- **스크립트가 채워 넣은 값이 아니라 뼈대입니다.** 인증서(SHA-256 이상), firewalld 규칙, NetworkManager 설정, cgroup v2 대응 스크립트처럼 서버마다 다른 부분은 수집 결과를 보고 role에 반영하세요. `web_apache`는 TLS를 설정하지 않으며 Nginx role은 포함되어 있지 않습니다.
+- **스크립트가 채워 넣은 값이 아니라 뼈대입니다.** 인증서(SHA-256 이상), firewalld 규칙, NetworkManager 설정, cgroup v2 대응 스크립트처럼 서버마다 다른 부분은 수집 결과를 보고 role에 반영하세요. `web_apache`는 소스 빌드 방식이며 TLS를 설정하지 않고, Nginx role은 포함되어 있지 않습니다. 소스 tarball(`apache_tarball_url`, `tomcat_tarball_url`)은 내부 미러 URL을 `group_vars/rocky9_new.yml`에 채워야 배포가 시작됩니다.
 - **IP 교체 잡**은 구 VM의 SSH가 끊기도록 설계되어 있어 해당 태스크를 `async`로 분리했습니다. 신규 VM은 서비스 IP를 primary로, 임시 IP를 secondary로 유지해 잡 연결이 유지됩니다. 플랫폼에 IP·MAC 바인딩이 켜져 있으면 OS에서 IP를 바꾸는 방식 자체가 막힐 수 있습니다. 전환 후에는 AWX 인벤토리의 `ansible_host`를 서로 바꿔 주세요.
 - 동일 IP에 다른 호스트 키가 생기므로 전환 후 SSH 호스트 키 불일치가 날 수 있습니다. 리허설에서만 `ansible_ssh_common_args: -o StrictHostKeyChecking=no`로 우회하고, 운영에서는 known_hosts를 관리하세요.
 - 배치는 **timer 유닛만** `batch_units`에 넣으세요. oneshot service를 넣으면 시작과 동시에 배치가 실행됩니다.

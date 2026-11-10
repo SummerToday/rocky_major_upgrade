@@ -1,45 +1,175 @@
 ---
-- name: Install Apache httpd and mod_ssl
+- name: Assert the required variables are set
+  ansible.builtin.assert:
+    that:
+      - apache_version | length > 0
+      - apache_tarball_url | length > 0
+    fail_msg: "Set apache_version and apache_tarball_url in group_vars/rocky9_new.yml"
+    quiet: true
+
+- name: Install the build dependencies (Rocky 9 repositories, CRB included)
   ansible.builtin.dnf:
-    name:
-      - httpd
-      - mod_ssl
+    name: "{{ apache_build_packages }}"
+    enablerepo: "{{ apache_build_enablerepo }}"
     state: present
 
-- name: Allow httpd to connect to the backend (SELinux)
-  ansible.posix.seboolean:
-    name: httpd_can_network_connect
-    state: true
-    persistent: true
-  when: apache_proxy_rules | length > 0
+- name: Create the Apache group
+  ansible.builtin.group:
+    name: "{{ apache_group }}"
+    gid: "{{ apache_gid | default(omit) }}"
+    system: true
 
-- name: Deploy the site configuration
+- name: Create the Apache user
+  ansible.builtin.user:
+    name: "{{ apache_user }}"
+    group: "{{ apache_group }}"
+    uid: "{{ apache_uid | default(omit) }}"
+    system: true
+    shell: /sbin/nologin
+    home: "{{ apache_user_home }}"
+    create_home: false
+
+- name: Download the httpd source tarball
+  ansible.builtin.get_url:
+    url: "{{ apache_tarball_url }}"
+    dest: "/var/tmp/httpd-{{ apache_version }}.tar.gz"
+    checksum: "{{ apache_tarball_checksum | default(omit, true) }}"
+    mode: "0644"
+
+- name: Create the build directory
+  ansible.builtin.file:
+    path: "{{ apache_build_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Unpack the httpd source
+  ansible.builtin.unarchive:
+    src: "/var/tmp/httpd-{{ apache_version }}.tar.gz"
+    dest: "{{ apache_build_dir }}"
+    remote_src: true
+    creates: "{{ apache_build_dir }}/httpd-{{ apache_version }}/configure"
+
+- name: Configure the build with the options of the old VM
+  ansible.builtin.command:
+    argv: "{{ ['./configure'] + apache_configure_args }}"
+    chdir: "{{ apache_build_dir }}/httpd-{{ apache_version }}"
+    creates: "{{ apache_build_dir }}/httpd-{{ apache_version }}/Makefile"
+
+- name: Compile httpd
+  ansible.builtin.command:
+    argv: ["make", "-j{{ ansible_facts['processor_nproc'] | default(1) }}"]
+    chdir: "{{ apache_build_dir }}/httpd-{{ apache_version }}"
+    creates: "{{ apache_build_dir }}/httpd-{{ apache_version }}/httpd"
+
+- name: Install httpd under the versioned prefix
+  ansible.builtin.command:
+    argv: ["make", "install"]
+    chdir: "{{ apache_build_dir }}/httpd-{{ apache_version }}"
+    creates: "{{ apache_prefix }}/bin/httpd"
+  notify: Restart httpd
+
+- name: Point the stable symlink to this version
+  ansible.builtin.file:
+    src: "{{ apache_prefix }}"
+    dest: "{{ apache_home_link }}"
+    state: link
+  notify: Restart httpd
+
+- name: Check that httpd.conf exists
+  ansible.builtin.stat:
+    path: "{{ apache_prefix }}/conf/httpd.conf"
+  register: apache_conf
+
+- name: Apply the settings of the old VM to httpd.conf
+  ansible.builtin.lineinfile:
+    path: "{{ apache_prefix }}/conf/httpd.conf"
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+    insertafter: "{{ item.insertafter | default(omit) }}"
+  loop:
+    - { regexp: '^ServerRoot\s', line: 'ServerRoot "{{ apache_home_link }}"' }
+    - { regexp: '^Listen\s', line: "Listen {{ apache_http_port }}" }
+    - { regexp: '^User\s', line: "User {{ apache_user }}" }
+    - { regexp: '^Group\s', line: "Group {{ apache_group }}" }
+    - { regexp: '^#?ServerName\s', line: "ServerName {{ apache_server_name }}" }
+    - { regexp: '^PidFile\s', line: 'PidFile "{{ apache_pid_file }}"', insertafter: EOF }
+  when: apache_conf.stat.exists
+  notify: Restart httpd
+
+- name: Deploy the optional reverse proxy rules
   ansible.builtin.template:
-    src: site.conf.j2
-    dest: /etc/httpd/conf.d/00-site.conf
+    src: proxy-rules.conf.j2
+    dest: "{{ apache_prefix }}/conf/extra/proxy-rules.conf"
     owner: root
     group: root
     mode: "0644"
+  when: apache_proxy_rules | length > 0 and apache_conf.stat.exists
   notify: Restart httpd
 
-- name: Open the HTTP and HTTPS services in firewalld
+- name: Include the proxy rules from httpd.conf
+  ansible.builtin.lineinfile:
+    path: "{{ apache_prefix }}/conf/httpd.conf"
+    line: "Include conf/extra/proxy-rules.conf"
+    insertafter: EOF
+  when: apache_proxy_rules | length > 0 and apache_conf.stat.exists
+  notify: Restart httpd
+
+- name: Add the SELinux file contexts of the old VM
+  community.general.sefcontext:
+    target: "{{ item.target }}"
+    setype: "{{ item.setype }}"
+    state: present
+  loop: "{{ apache_selinux_fcontexts }}"
+  register: apache_sefcontext
+
+- name: Apply the SELinux labels
+  ansible.builtin.command:
+    argv: [restorecon, -Rv, "{{ apache_prefix }}", "{{ apache_home_link }}"]
+  register: apache_restorecon
+  changed_when: apache_restorecon.stdout | length > 0
+  when: apache_sefcontext is changed
+
+- name: Set the SELinux booleans of the old VM
+  ansible.posix.seboolean:
+    name: "{{ item }}"
+    state: true
+    persistent: true
+  loop: "{{ apache_selinux_booleans }}"
+
+- name: Install the systemd unit
+  ansible.builtin.template:
+    src: httpd-custom.service.j2
+    dest: /etc/systemd/system/httpd-custom.service
+    owner: root
+    group: root
+    mode: "0644"
+  notify:
+    - Reload systemd
+    - Restart httpd
+
+- name: Open the HTTP port in firewalld
   ansible.posix.firewalld:
-    service: "{{ item }}"
+    port: "{{ item }}"
     permanent: true
     immediate: true
     state: enabled
-  loop:
-    - http
-    - https
+  loop: "{{ apache_open_firewall_ports }}"
   ignore_errors: "{{ ansible_check_mode }}"
 
+- name: Apply pending handlers before validating and starting
+  ansible.builtin.meta: flush_handlers
+
 - name: Validate the Apache configuration
-  ansible.builtin.command: httpd -t
+  ansible.builtin.command: "{{ apache_httpd_bin }} -t"
   changed_when: false
 
 - name: Enable and start httpd
   ansible.builtin.systemd:
-    name: httpd
+    name: httpd-custom
     enabled: true
     state: started
+    daemon_reload: true
+  # The unit file does not exist yet in check mode on a fresh VM
   ignore_errors: "{{ ansible_check_mode }}"

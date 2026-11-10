@@ -8,3 +8,5 @@ common_base_packages:
   - iputils
   - policycoreutils-python-utils
   - audit
+# Application data directory shared by the web and WAS roles (same layout as the old VM)
+common_data_dir: /data

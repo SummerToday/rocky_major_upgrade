@@ -84,7 +84,6 @@
   ansible.builtin.file:
     path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/conf"
     state: directory
-    owner: root
     group: "{{ tomcat_group }}"
     mode: "u=rwX,g=rX,o="
     recurse: true
@@ -97,21 +96,19 @@
     group: "{{ tomcat_group }}"
     mode: "0750"
 
-# The old VM labels the whole Tomcat tree and the stable symlink as bin_t
-- name: Find the Tomcat control scripts
-  ansible.builtin.find:
-    paths: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin"
-    patterns: "*.sh"
-  register: tomcat_scripts
-
-- name: Make the Tomcat control scripts executable for the Tomcat user
+# The official tarball unpacks as root with owner-only permissions (scripts 0750, files 0640),
+# so the Tomcat user could neither run the scripts nor read the jars
+- name: Make the Tomcat program files readable and runnable by the Tomcat user
   ansible.builtin.file:
-    path: "{{ item.path }}"
-    mode: "0755"
-  loop: "{{ tomcat_scripts.files }}"
-  loop_control:
-    label: "{{ item.path }}"
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/{{ item }}"
+    state: directory
+    recurse: true
+    mode: "u=rwX,g=rX,o=rX"
+  loop:
+    - bin
+    - lib
 
+# The old VM labels the whole Tomcat tree and the stable symlink as bin_t
 - name: Label the Tomcat tree and the stable symlink as bin_t so systemd may execute the scripts
   community.general.sefcontext:
     target: "{{ item }}"
@@ -139,7 +136,7 @@
     dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin/setenv.sh"
     owner: root
     group: "{{ tomcat_group }}"
-    mode: "0640"
+    mode: "0644"
   notify: Restart tomcat
 
 - name: Install the systemd unit

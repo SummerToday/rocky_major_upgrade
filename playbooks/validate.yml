@@ -5,17 +5,38 @@
   hosts: rocky9_new
   become: true
   gather_facts: true
+  vars:
+    validate_ignored_failed_units:
+      - man-db-cache-update
   tasks:
     - name: Collect failed systemd units  # noqa: command-instead-of-module
       ansible.builtin.command: systemctl --failed --no-legend --plain
       register: failed_units
       changed_when: false
 
-    - name: No systemd unit may be in failed state
+    # Transient run-*.service units that dnf scriptlets start (man-db cache refresh) can end up failed
+    # without touching the application services, so they are reported but do not block the cutover
+    - name: Split the failed units into blocking and ignored ones
+      ansible.builtin.set_fact:
+        blocking_failed_units: >-
+          {{ failed_units.stdout_lines
+             | reject('search', validate_ignored_failed_units | join('|'))
+             | list }}
+        ignored_failed_units: >-
+          {{ failed_units.stdout_lines
+             | select('search', validate_ignored_failed_units | join('|'))
+             | list }}
+
+    - name: Show the ignored failed units
+      ansible.builtin.debug:
+        msg: "Ignored failed units (informational): {{ ignored_failed_units }}"
+      when: ignored_failed_units | length > 0
+
+    - name: No other systemd unit may be in failed state
       ansible.builtin.assert:
         that:
-          - failed_units.stdout | trim | length == 0
-        fail_msg: "Failed units: {{ failed_units.stdout_lines }}"
+          - blocking_failed_units | length == 0
+        fail_msg: "Failed units: {{ blocking_failed_units }}"
         quiet: true
 
     - name: Collect listening TCP ports
@@ -100,7 +121,8 @@
     - name: Validation summary
       ansible.builtin.debug:
         msg:
-          failed_units: "{{ failed_units.stdout_lines }}"
+          failed_units: "{{ blocking_failed_units }}"
+          ignored_failed_units: "{{ ignored_failed_units }}"
           missing_ports: "{{ missing_ports }}"
           cgroup_fs: "{{ cgroup_fs.stdout }}"
           health_checks: "{{ health_checks | map(attribute='url') | list }}"

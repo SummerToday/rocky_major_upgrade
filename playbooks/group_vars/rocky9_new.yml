@@ -8,7 +8,7 @@ tomcat_enabled: true
 # Layout and ids mirror the old VM: /data/apache-tomcat-<version> with the /data/tomcat symlink
 jdk_package: java-17-openjdk-headless
 tomcat_version: "9.0.123"     # exact version running on the old VM
-tomcat_tarball_url: ""        # REQUIRED: internal mirror URL of apache-tomcat-<version>.tar.gz
+tomcat_tarball_url: "https://archive.apache.org/dist/tomcat/tomcat-9/v9.0.123/bin/apache-tomcat-9.0.123.tar.gz"
 tomcat_tarball_checksum: ""   # optional, for example sha512:<hash>
 tomcat_install_root: /data
 tomcat_home: /data/tomcat
@@ -25,7 +25,7 @@ tomcat_webapps: []
 
 # --- Apache (built from source: the old binary links OpenSSL 1.1, Rocky 9 only has OpenSSL 3) ---
 apache_version: "2.4.69"      # exact version running on the old VM
-apache_tarball_url: ""        # REQUIRED: internal mirror URL of httpd-<version>.tar.gz
+apache_tarball_url: "https://archive.apache.org/dist/httpd/httpd-2.4.69.tar.gz"
 apache_tarball_checksum: ""   # optional, for example sha256:<hash>
 apache_install_root: /data
 apache_uid: 990

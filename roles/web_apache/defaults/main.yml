@@ -33,6 +33,8 @@ apache_build_packages:
   - pcre2-devel
   - openssl-devel
   - expat-devel
+  # mod_deflate (--enable-deflate) fails in ./configure without the zlib headers
+  - zlib-devel
 # apr-devel and apr-util-devel live in the CRB repository on Rocky 9
 apache_build_enablerepo: crb
 # Same configure options as the old VM (taken from build/config.nice)

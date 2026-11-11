@@ -98,6 +98,20 @@
     mode: "0750"
 
 # The old VM labels the whole Tomcat tree and the stable symlink as bin_t
+- name: Find the Tomcat control scripts
+  ansible.builtin.find:
+    paths: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin"
+    patterns: "*.sh"
+  register: tomcat_scripts
+
+- name: Make the Tomcat control scripts executable for the Tomcat user
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    mode: "0755"
+  loop: "{{ tomcat_scripts.files }}"
+  loop_control:
+    label: "{{ item.path }}"
+
 - name: Label the Tomcat tree and the stable symlink as bin_t so systemd may execute the scripts
   community.general.sefcontext:
     target: "{{ item }}"

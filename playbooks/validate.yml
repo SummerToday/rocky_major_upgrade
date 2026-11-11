@@ -118,11 +118,80 @@
         msg: "{{ avc_recent.stdout_lines }}"
       when: avc_recent.rc == 0
 
+    # Compare how the new VM is built against the old VM, key by key.
+    # The same read-only script runs on both hosts; the old VM is reached with delegate_to.
+    - name: Take the state snapshot on the new VM
+      ansible.builtin.script:
+        cmd: "files/state_snapshot.sh {{ apache_httpd_bin }} {{ tomcat_home }} {{ compare_http_ports | join(',') }}"
+      register: snap_new
+      changed_when: false
+      when: compare_with_old_vm | bool
+
+    - name: Take the same state snapshot on the old VM
+      ansible.builtin.script:
+        cmd: "files/state_snapshot.sh {{ apache_httpd_bin }} {{ tomcat_home }} {{ compare_http_ports | join(',') }}"
+      delegate_to: "{{ groups['rocky8_old'][0] }}"
+      register: snap_old
+      changed_when: false
+      when: compare_with_old_vm | bool
+
+    - name: Turn the snapshots into dictionaries
+      ansible.builtin.set_fact:
+        state_new: >-
+          {{ dict(snap_new.stdout_lines | map('regex_replace', '^([^=]*)=.*$', '\1')
+             | zip(snap_new.stdout_lines | map('regex_replace', '^[^=]*=', ''))) }}
+        state_old: >-
+          {{ dict(snap_old.stdout_lines | map('regex_replace', '^([^=]*)=.*$', '\1')
+             | zip(snap_old.stdout_lines | map('regex_replace', '^[^=]*=', ''))) }}
+      when: compare_with_old_vm | bool
+
+    - name: Compare every key of the two snapshots
+      ansible.builtin.set_fact:
+        compare_rows: >-
+          {%- set rows = [] -%}
+          {%- for k in (state_old.keys() | list + state_new.keys() | list) | unique | sort -%}
+          {%- set ns = namespace(info=false) -%}
+          {%- for pre in compare_informational_prefixes -%}
+          {%- if k.startswith(pre) -%}{%- set ns.info = true -%}{%- endif -%}
+          {%- endfor -%}
+          {%- set o = state_old.get(k, '(missing)') -%}
+          {%- set n = state_new.get(k, '(missing)') -%}
+          {%- set _ = rows.append({'key': k, 'old': o, 'new': n, 'same': o == n, 'info': ns.info}) -%}
+          {%- endfor -%}
+          {{ rows }}
+      when: compare_with_old_vm | bool
+
+    - name: Report the comparison (SAME, INFO = differs by design, DIFF = must match)
+      ansible.builtin.debug:
+        msg: >-
+          {%- set lines = [] -%}
+          {%- for r in compare_rows -%}
+          {%- if r.same -%}
+          {%- set _ = lines.append('SAME  ' ~ r.key ~ '  ' ~ (r.old | truncate(100))) -%}
+          {%- else -%}
+          {%- set _ = lines.append(('INFO' if r.info else 'DIFF') ~ '  ' ~ r.key ~ '  old=' ~ r.old ~ '  new=' ~ r.new) -%}
+          {%- endif -%}
+          {%- endfor -%}
+          {{ lines }}
+      when: compare_with_old_vm | bool
+
+    - name: The new VM must be built like the old VM
+      ansible.builtin.assert:
+        that:
+          - compare_rows | rejectattr('same') | rejectattr('info') | list | length == 0
+        fail_msg: >-
+          Differences from the old VM: {{ compare_rows | rejectattr('same') | rejectattr('info') | map(attribute='key') | list }}
+        quiet: true
+      when: compare_with_old_vm | bool and compare_fail_on_diff | bool
+
     - name: Validation summary
       ansible.builtin.debug:
         msg:
           failed_units: "{{ blocking_failed_units }}"
           ignored_failed_units: "{{ ignored_failed_units }}"
+          differs_from_old_vm: >-
+            {{ (compare_rows | default([]) | rejectattr('same') | rejectattr('info') | map(attribute='key') | list)
+               if compare_with_old_vm | bool else 'not compared' }}
           missing_ports: "{{ missing_ports }}"
           cgroup_fs: "{{ cgroup_fs.stdout }}"
           health_checks: "{{ health_checks | map(attribute='url') | list }}"

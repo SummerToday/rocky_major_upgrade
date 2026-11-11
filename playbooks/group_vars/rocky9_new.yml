@@ -46,3 +46,20 @@ health_checks:
 # --- Batch / cron jobs stay disabled on the new VM until cutover ---
 batch_units: []
 batch_manage_crond: false
+
+# validate.yml compares the new VM with the old VM (same read-only script on both hosts)
+compare_with_old_vm: true
+compare_fail_on_diff: true
+compare_http_ports: [80, 8080]
+# Keys that are expected to differ (shown as INFO, they do not fail validate):
+# - apache.compile: APR/PCRE versions differ between Rocky 8 and 9
+# - selinux.fcontext: labels of conf/logs/htdocs differ on purpose (see roles/web_apache)
+# - firewall.: ports are opened by the playbook (80 only)
+# - sshd.: root login policy is still undecided
+# - resp.time: response times vary between hosts
+compare_informational_prefixes:
+  - apache.compile
+  - selinux.fcontext
+  - firewall.
+  - sshd.
+  - resp.time

@@ -44,8 +44,8 @@
   ansible.builtin.file:
     path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
     state: directory
-    owner: root
-    group: root
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
     mode: "0755"
 
 - name: Unpack Tomcat
@@ -54,8 +54,8 @@
     dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
     remote_src: true
     extra_opts: ["--strip-components=1"]
-    owner: root
-    group: root
+    owner: "{{ tomcat_user }}"
+    group: "{{ tomcat_group }}"
     creates: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin/catalina.sh"
   when: tomcat_tarball.stat.exists
   notify: Restart tomcat
@@ -67,46 +67,32 @@
     state: link
   notify: Restart tomcat
 
-- name: Give the runtime directories to the Tomcat user
+# The old VM runs the whole Tomcat tree as tomcat:tomcat (conf 700, scripts 751)
+- name: Give the whole Tomcat tree to the Tomcat user
   ansible.builtin.file:
-    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/{{ item }}"
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}"
     state: directory
     owner: "{{ tomcat_user }}"
     group: "{{ tomcat_group }}"
     recurse: true
-  loop:
-    - logs
-    - temp
-    - work
-    - webapps
 
-- name: Make the configuration readable by the Tomcat group only
+- name: Restrict the configuration to the Tomcat user
   ansible.builtin.file:
     path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/conf"
     state: directory
-    group: "{{ tomcat_group }}"
-    mode: "u=rwX,g=rX,o="
+    mode: "u=rwX,g=,o="
     recurse: true
 
-- name: Let Tomcat create its per-host context directory (conf/Catalina)
+# The tarball scripts are 0750; the old VM has 0751 (execute for others)
+- name: Make the Tomcat scripts and libraries match the old VM
   ansible.builtin.file:
-    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/conf/Catalina"
-    state: directory
-    owner: "{{ tomcat_user }}"
-    group: "{{ tomcat_group }}"
-    mode: "0750"
-
-# The official tarball unpacks as root with owner-only permissions (scripts 0750, files 0640),
-# so the Tomcat user could neither run the scripts nor read the jars
-- name: Make the Tomcat program files readable and runnable by the Tomcat user
-  ansible.builtin.file:
-    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/{{ item }}"
+    path: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/{{ item.dir }}"
     state: directory
     recurse: true
-    mode: "u=rwX,g=rX,o=rX"
+    mode: "{{ item.mode }}"
   loop:
-    - bin
-    - lib
+    - { dir: bin, mode: "u=rwX,g=rX,o=X" }
+    - { dir: lib, mode: "u=rwX,g=rX,o=" }
 
 # The old VM labels the whole Tomcat tree and the stable symlink as bin_t
 - name: Label the Tomcat tree and the stable symlink as bin_t so systemd may execute the scripts
@@ -134,9 +120,9 @@
   ansible.builtin.template:
     src: setenv.sh.j2
     dest: "{{ tomcat_install_root }}/apache-tomcat-{{ tomcat_version }}/bin/setenv.sh"
-    owner: root
+    owner: "{{ tomcat_user }}"
     group: "{{ tomcat_group }}"
-    mode: "0644"
+    mode: "0640"
   notify: Restart tomcat
 
 - name: Install the systemd unit

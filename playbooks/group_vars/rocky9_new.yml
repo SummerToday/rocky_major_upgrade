@@ -57,9 +57,11 @@ compare_http_ports: [80, 8080]
 # - firewall.: ports are opened by the playbook (80 only)
 # - sshd.: root login policy is still undecided
 # - resp.time: response times vary between hosts
+# - tomcat.java_home: the old path pins the el8 JDK build; the new VM uses the /usr/lib/jvm/jre alternative (same major version, see java.major)
 compare_informational_prefixes:
   - apache.compile
   - selinux.fcontext
   - firewall.
   - sshd.
   - resp.time
+  - tomcat.java_home

@@ -98,6 +98,15 @@
   when: apache_conf.stat.exists
   notify: Restart httpd
 
+# The old httpd.conf addresses everything through the stable symlink, not the versioned directory
+- name: Point DocumentRoot, ScriptAlias and the Directory blocks at the stable symlink
+  ansible.builtin.replace:
+    path: "{{ apache_prefix }}/conf/httpd.conf"
+    regexp: '^(DocumentRoot\s+"|<Directory\s+"|ScriptAlias\s+/cgi-bin/\s+"){{ apache_prefix | regex_escape }}'
+    replace: '\1{{ apache_home_link }}'
+  when: apache_conf.stat.exists
+  notify: Restart httpd
+
 - name: Deploy the optional reverse proxy rules
   ansible.builtin.template:
     src: proxy-rules.conf.j2

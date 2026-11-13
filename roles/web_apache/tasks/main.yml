@@ -99,10 +99,11 @@
   notify: Restart httpd
 
 # The old httpd.conf addresses everything through the stable symlink, not the versioned directory
+# (ScriptAlias sits indented inside an <IfModule> block, hence the leading whitespace in the regexp)
 - name: Point DocumentRoot, ScriptAlias and the Directory blocks at the stable symlink
   ansible.builtin.replace:
     path: "{{ apache_prefix }}/conf/httpd.conf"
-    regexp: '^(DocumentRoot\s+"|<Directory\s+"|ScriptAlias\s+/cgi-bin/\s+"){{ apache_prefix | regex_escape }}'
+    regexp: '^(\s*DocumentRoot\s+"|\s*<Directory\s+"|\s*ScriptAlias\s+/cgi-bin/\s+"){{ apache_prefix | regex_escape }}'
     replace: '\1{{ apache_home_link }}'
   when: apache_conf.stat.exists
   notify: Restart httpd

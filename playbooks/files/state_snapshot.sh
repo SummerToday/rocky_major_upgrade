@@ -22,7 +22,10 @@ emit apache.version "$("$APACHE_BIN" -v 2>/dev/null | awk '/version/{print $3}')
 emit apache.mpm "$("$APACHE_BIN" -V 2>/dev/null | awk -F': *' '/Server MPM/{print $2}')"
 emit apache.root "$("$APACHE_BIN" -V 2>/dev/null | awk -F'"' '/HTTPD_ROOT/{print $2}')"
 emit apache.modules "$("$APACHE_BIN" -M 2>/dev/null | awk '/_module/{print $1}' | sort | join)"
-emit apache.conf "$(strip "$APACHE_ROOT/conf/httpd.conf" | join)"
+# ServerName is compared separately: its position in the file does not matter (the old VM has it near the end,
+# the role replaces the commented default line in place), but its value does
+emit apache.conf "$(strip "$APACHE_ROOT/conf/httpd.conf" | grep -v '^ServerName ' | join)"
+emit apache.servername "$(strip "$APACHE_ROOT/conf/httpd.conf" | grep '^ServerName ' | join)"
 emit apache.vhosts "$("$APACHE_BIN" -S 2>&1 | grep -E 'port|namevhost|^User|^Group|Main' | norm | join)"
 emit apache.compile "$("$APACHE_BIN" -V 2>/dev/null | sed -n '/Server compiled with/,$p' | tail -n +2 | norm | sort | join)"
 
